@@ -31,15 +31,37 @@ pub(super) struct InlineCellEditor {
 }
 
 #[derive(Clone)]
+pub(super) struct RecordViewState {
+    pub(super) row: usize,
+    pub(super) filter: String,
+    pub(super) hide_nulls: bool,
+    pub(super) pretty_json: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct StoredResultSet {
+    pub(super) label: String,
+    pub(super) page: ColumnarPage,
+    pub(super) status_msg: String,
+    pub(super) mutator: StagedMutator,
+    pub(super) column_widths: Vec<f32>,
+    pub(super) selected_cell: Option<(usize, usize)>,
+    pub(super) row_selection: RowSelection,
+}
+
+#[derive(Clone)]
 pub(super) struct QueryTab {
     pub(super) id: u64,
     pub(super) title: String,
     pub(super) slot: Option<ServerSlotId>,
     pub(super) sql: String,
     pub(super) cursor_byte: usize,
+    pub(super) selection_byte_range: Option<(usize, usize)>,
     pub(super) bound_table: Option<(String, String)>,
     pub(super) filter_sort: PageFilterSort,
     pub(super) page: Option<ColumnarPage>,
+    pub(super) result_sets: Vec<StoredResultSet>,
+    pub(super) active_result_idx: usize,
     pub(super) last_status_msg: String,
     pub(super) is_running: bool,
     pub(super) mutator: StagedMutator,
@@ -52,6 +74,8 @@ pub(super) struct QueryTab {
     pub(super) column_widths: Vec<f32>,
     pub(super) row_selection: RowSelection,
     pub(super) is_inspector_open: bool,
+    pub(super) record_view: Option<RecordViewState>,
+    pub(super) diff_rows: Option<(usize, usize, bool)>,
     pub(super) is_counting_rows: bool,
     pub(super) is_submitting_mutations: bool,
     pub(super) is_loading_full_cell: bool,
@@ -66,13 +90,16 @@ impl QueryTab {
             slot,
             sql: "SELECT VERSION() AS mysql_version, DATABASE() AS current_db, NOW() AS server_time;".to_string(),
             cursor_byte: 0,
+            selection_byte_range: None,
             bound_table: None,
             filter_sort: PageFilterSort {
                 page_size: 500,
                 ..Default::default()
             },
             page: None,
-            last_status_msg: "Ready. Press Cmd/Ctrl+Enter to run the current statement".into(),
+            result_sets: Vec::new(),
+            active_result_idx: 0,
+            last_status_msg: "Ready. Press Cmd/Ctrl+Enter to run, Cmd/Ctrl+Shift+Enter to run all".into(),
             is_running: false,
             mutator: StagedMutator::new(),
             selected_cell: None,
@@ -84,6 +111,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            record_view: None,
+            diff_rows: None,
             is_counting_rows: false,
             is_submitting_mutations: false,
             is_loading_full_cell: false,
@@ -110,9 +139,12 @@ impl QueryTab {
             slot: Some(slot),
             sql,
             cursor_byte: 0,
+            selection_byte_range: None,
             bound_table: Some((schema, table)),
             filter_sort,
             page: None,
+            result_sets: Vec::new(),
+            active_result_idx: 0,
             last_status_msg: "Loading table page…".into(),
             is_running: true,
             mutator: StagedMutator::new(),
@@ -125,6 +157,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            record_view: None,
+            diff_rows: None,
             is_counting_rows: false,
             is_submitting_mutations: false,
             is_loading_full_cell: false,
@@ -161,9 +195,12 @@ impl QueryTab {
             slot,
             sql: state.sql.clone(),
             cursor_byte,
+            selection_byte_range: None,
             bound_table: state.bound_table.clone(),
             filter_sort,
             page: None,
+            result_sets: Vec::new(),
+            active_result_idx: 0,
             last_status_msg,
             is_running: false,
             mutator: StagedMutator::new(),
@@ -176,6 +213,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            record_view: None,
+            diff_rows: None,
             is_counting_rows: false,
             is_submitting_mutations: false,
             is_loading_full_cell: false,
@@ -350,4 +389,101 @@ impl QueryTab {
             self.select_cell(editor.row, editor.column);
         }
     }
+
+    pub(super) fn save_active_result_snapshot(&mut self) {
+        if let (Some(slot), Some(page)) = (self.result_sets.get_mut(self.active_result_idx), self.page.as_ref()) {
+            slot.page = page.clone();
+            slot.status_msg = self.last_status_msg.clone();
+            slot.mutator = self.mutator.clone();
+            slot.column_widths = self.column_widths.clone();
+            slot.selected_cell = self.selected_cell;
+            slot.row_selection = self.row_selection.clone();
+        }
+    }
+
+    pub(super) fn set_result_sets(&mut self, sets: Vec<StoredResultSet>) {
+        self.result_sets = sets;
+        self.active_result_idx = 0;
+        self.inline_editor = None;
+        self.record_view = None;
+        self.diff_rows = None;
+        if let Some(first) = self.result_sets.first() {
+            self.page = Some(first.page.clone());
+            self.last_status_msg = first.status_msg.clone();
+            self.mutator = first.mutator.clone();
+            self.column_widths = first.column_widths.clone();
+            self.selected_cell = first.selected_cell;
+            self.row_selection = first.row_selection.clone();
+        }
+    }
+
+    pub(super) fn switch_result_set(&mut self, idx: usize) {
+        if idx >= self.result_sets.len() || idx == self.active_result_idx {
+            return;
+        }
+        self.cancel_inline_edit();
+        self.save_active_result_snapshot();
+        self.active_result_idx = idx;
+        let next = &self.result_sets[idx];
+        self.page = Some(next.page.clone());
+        self.last_status_msg = next.status_msg.clone();
+        self.mutator = next.mutator.clone();
+        self.column_widths = next.column_widths.clone();
+        self.selected_cell = next.selected_cell;
+        self.row_selection = next.row_selection.clone();
+        self.record_view = None;
+        self.diff_rows = None;
+    }
+
+    pub(super) fn close_result_set(&mut self, idx: usize) {
+        if idx >= self.result_sets.len() {
+            return;
+        }
+        self.cancel_inline_edit();
+        self.save_active_result_snapshot();
+        self.result_sets.remove(idx);
+        if self.result_sets.is_empty() {
+            self.active_result_idx = 0;
+            self.page = None;
+            self.mutator.revert_all();
+            self.column_widths.clear();
+            self.selected_cell = None;
+            self.row_selection.clear();
+            self.record_view = None;
+            self.diff_rows = None;
+            return;
+        }
+        if idx < self.active_result_idx || self.active_result_idx >= self.result_sets.len() {
+            self.active_result_idx = self.active_result_idx.saturating_sub(1);
+        }
+        let next = &self.result_sets[self.active_result_idx];
+        self.page = Some(next.page.clone());
+        self.last_status_msg = next.status_msg.clone();
+        self.mutator = next.mutator.clone();
+        self.column_widths = next.column_widths.clone();
+        self.selected_cell = next.selected_cell;
+        self.row_selection = next.row_selection.clone();
+        self.record_view = None;
+        self.diff_rows = None;
+    }
+
+    pub(super) fn has_any_unsaved_changes(&self) -> bool {
+        self.mutator.has_changes()
+            || self
+                .result_sets
+                .iter()
+                .enumerate()
+                .any(|(i, rs)| i != self.active_result_idx && rs.mutator.has_changes())
+    }
+}
+
+pub(super) fn result_set_label(page: &ColumnarPage, idx: usize) -> String {
+    let base = page
+        .columns
+        .iter()
+        .find_map(|c| c.table.as_deref().filter(|t| !t.is_empty()))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("Result {}", idx + 1));
+    let more = if page.has_more_rows { "+" } else { "" };
+    format!("{base} ({}{more})", page.row_count)
 }

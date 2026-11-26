@@ -235,6 +235,23 @@ pub fn highlight_mysql_layout(
     wrap_width: f32,
     palette: Palette,
 ) -> std::sync::Arc<egui::Galley> {
+    build_mysql_layout(ui, text, wrap_width, palette)
+}
+
+pub fn highlight_mysql_editor_layout(
+    ui: &egui::Ui,
+    text: &str,
+    palette: Palette,
+) -> std::sync::Arc<egui::Galley> {
+    build_mysql_layout(ui, text, f32::INFINITY, palette)
+}
+
+fn build_mysql_layout(
+    ui: &egui::Ui,
+    text: &str,
+    wrap_width: f32,
+    palette: Palette,
+) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
     let font_id = FontId::new(13.0, FontFamily::Monospace);

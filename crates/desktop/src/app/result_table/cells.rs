@@ -21,31 +21,34 @@ pub(super) struct CellDisplay {
 }
 
 pub(in crate::app) fn compute_column_widths(ui: &Ui, page: &ColumnarPage) -> Vec<f32> {
+    (0..page.columns.len())
+        .map(|column_index| compute_single_column_width(ui, page, column_index))
+        .collect()
+}
+
+pub(in crate::app) fn compute_single_column_width(ui: &Ui, page: &ColumnarPage, column_index: usize) -> f32 {
+    let Some(column) = page.columns.get(column_index) else {
+        return MIN_COLUMN_WIDTH;
+    };
     let header_font = FontId::proportional(CELL_FONT_SIZE);
     let cell_font = FontId::monospace(CELL_FONT_SIZE);
     let sampled_rows = page.row_count.min(WIDTH_SAMPLE_ROWS);
     ui.fonts(|fonts| {
-        page.columns
-            .iter()
-            .enumerate()
-            .map(|(column_index, column)| {
-                let header_width = fonts
-                    .layout_no_wrap(column.name.clone(), header_font.clone(), Color32::WHITE)
+        let header_width = fonts
+            .layout_no_wrap(column.name.clone(), header_font, Color32::WHITE)
+            .size()
+            .x
+            + HEADER_ICON_ALLOWANCE;
+        let widest_cell = (0..sampled_rows)
+            .filter_map(|row| page.cell_str(row, column_index))
+            .map(|text| {
+                fonts
+                    .layout_no_wrap(truncate_display(text, 48), cell_font.clone(), Color32::WHITE)
                     .size()
                     .x
-                    + HEADER_ICON_ALLOWANCE;
-                let widest_cell = (0..sampled_rows)
-                    .filter_map(|row| page.cell_str(row, column_index))
-                    .map(|text| {
-                        fonts
-                            .layout_no_wrap(truncate_display(text, 48), cell_font.clone(), Color32::WHITE)
-                            .size()
-                            .x
-                    })
-                    .fold(0.0_f32, f32::max);
-                (header_width.max(widest_cell) + CELL_PADDING_X * 2.0).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
             })
-            .collect()
+            .fold(0.0_f32, f32::max);
+        (header_width.max(widest_cell) + CELL_PADDING_X * 2.0).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
     })
 }
 

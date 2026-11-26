@@ -1,4 +1,4 @@
-use super::query_tab::InlineCommitMove;
+use super::query_tab::{InlineCommitMove, RecordViewState};
 use super::result_table::TableAction;
 use super::row_selection::RowSelectMode;
 use super::{CottonDataApp, PendingDiscardAction};
@@ -330,12 +330,108 @@ impl CottonDataApp {
                 tab.cancel_inline_edit();
                 tab.row_selection.select(row, RowSelectMode::Replace);
                 tab.select_cell(row, column);
+                tab.record_view = None;
                 tab.is_inspector_open = true;
+            }
+            TableAction::OpenRecordView { row } => {
+                tab.cancel_inline_edit();
+                tab.row_selection.select(row, RowSelectMode::Replace);
+                tab.select_cell(row, 0);
+                tab.is_inspector_open = false;
+                let (filter, hide_nulls, pretty_json) = tab
+                    .record_view
+                    .as_ref()
+                    .map(|rv| (rv.filter.clone(), rv.hide_nulls, rv.pretty_json))
+                    .unwrap_or_else(|| (String::new(), false, true));
+                tab.record_view = Some(RecordViewState {
+                    row,
+                    filter,
+                    hide_nulls,
+                    pretty_json,
+                });
+            }
+            TableAction::CompareSelectedRows(row_a, row_b) => {
+                tab.diff_rows = Some((row_a, row_b, true));
+            }
+            TableAction::QuickFilterValue { row, column, negate } => {
+                self.apply_quick_filter_by_cell(row, column, negate);
+            }
+            TableAction::CopyColumnAsIn { row, column } => {
+                self.copy_column_as_in_clause(ctx, row, column);
             }
             TableAction::CopyValue { row, column } => self.copy_cell_value(ctx, row, column),
             TableAction::CopyRows(format) => self.copy_selected_rows(ctx, format),
             TableAction::SelectAll => self.select_all_rows(),
         }
+    }
+
+    fn apply_quick_filter_by_cell(&mut self, row: usize, column: usize, negate: bool) {
+        let dialect = self.slot_dialect(self.tabs[self.active_tab_idx].slot.or(self.active_slot));
+        let predicate = {
+            let tab = &self.tabs[self.active_tab_idx];
+            let Some(page) = &tab.page else {
+                return;
+            };
+            let Some(col) = page.columns.get(column) else {
+                return;
+            };
+            let col_ident = dialect.quote_ident(col.sql_column_name());
+            let val = tab.cell_value(row, column).unwrap_or(CellValue::Null);
+            if val.is_null() {
+                if negate {
+                    format!("{col_ident} IS NOT NULL")
+                } else {
+                    format!("{col_ident} IS NULL")
+                }
+            } else {
+                let op = if negate { "!=" } else { "=" };
+                let literal = cottondata_grid::mutator::format_sql_literal(dialect, &val, col.is_numeric);
+                format!("{col_ident} {op} {literal}")
+            }
+        };
+        let tab = &mut self.tabs[self.active_tab_idx];
+        let existing = tab.filter_sort.where_clause.trim();
+        tab.filter_sort.where_clause = if existing.is_empty() {
+            predicate
+        } else {
+            format!("({existing}) AND {predicate}")
+        };
+        if tab.mutator.has_changes() {
+            self.unsaved_guard_modal = Some(PendingDiscardAction::ReloadTablePage { page_index: 0 });
+        } else {
+            tab.filter_sort.page_index = 0;
+            self.send_reload_active_table_page();
+        }
+    }
+
+    fn copy_column_as_in_clause(&mut self, ctx: &egui::Context, row: usize, column: usize) {
+        let dialect = self.slot_dialect(self.tabs[self.active_tab_idx].slot.or(self.active_slot));
+        let tab = &mut self.tabs[self.active_tab_idx];
+        let Some(page) = &tab.page else {
+            return;
+        };
+        let Some(col) = page.columns.get(column) else {
+            return;
+        };
+        let mut target_rows = tab.row_selection.sorted_rows_below(page.row_count);
+        if target_rows.is_empty() || !target_rows.contains(&row) {
+            target_rows = vec![row];
+        }
+        let mut literals = Vec::with_capacity(target_rows.len());
+        for r in target_rows {
+            if let Some(val) = tab.cell_value(r, column) {
+                if !val.is_null() {
+                    literals.push(cottondata_grid::mutator::format_sql_literal(
+                        dialect,
+                        &val,
+                        col.is_numeric,
+                    ));
+                }
+            }
+        }
+        let formatted = format!("({})", literals.join(", "));
+        ctx.copy_text(formatted);
+        tab.last_status_msg = format!("Copied {} value(s) of {} as IN (…)", literals.len(), col.name);
     }
 
     pub(super) fn handle_table_shortcuts(&mut self, ctx: &egui::Context, editability: &Editability) {

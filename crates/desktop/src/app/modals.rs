@@ -8,6 +8,7 @@ use eframe::egui::{self, RichText};
 impl CottonDataApp {
     pub(super) fn render_modals(&mut self, ctx: &egui::Context, p: Palette) {
         self.render_sessions_modal(ctx, p);
+        self.render_row_diff_modal(ctx, p);
 
         if let Some(pending_action) = self.unsaved_guard_modal.clone() {
             let (deletes, updates, inserts) = self.tabs[self.active_tab_idx].mutator.pending_summary();

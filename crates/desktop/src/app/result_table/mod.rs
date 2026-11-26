@@ -6,7 +6,7 @@ use super::row_selection::{RowSelectMode, RowSelection};
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
 use crate::ui_kit::icon;
-pub(super) use cells::compute_column_widths;
+pub(super) use cells::{compute_column_widths, compute_single_column_width};
 use cells::{append_text, modified_cell_tooltip, paint_cell, row_badge, single_line_galley};
 use context_menu::render_cell_context_menu;
 use cottondata_grid::{ColumnarPage, Editability, ExportFormat, SortDirection, StagedMutator};
@@ -74,6 +74,19 @@ pub(super) enum TableAction {
         row: usize,
         column: usize,
     },
+    OpenRecordView {
+        row: usize,
+    },
+    CompareSelectedRows(usize, usize),
+    QuickFilterValue {
+        row: usize,
+        column: usize,
+        negate: bool,
+    },
+    CopyColumnAsIn {
+        row: usize,
+        column: usize,
+    },
     CopyValue {
         row: usize,
         column: usize,
@@ -86,6 +99,8 @@ pub(super) enum TableAction {
 pub(super) struct ResultTableInteraction {
     pub(super) action: Option<TableAction>,
     pub(super) clicked_header: Option<usize>,
+    pub(super) resized_column: Option<(usize, f32)>,
+    pub(super) autofit_column: Option<usize>,
 }
 
 pub(super) fn render_result_table(
@@ -111,7 +126,7 @@ pub(super) fn render_result_table(
             .enable_scrolling(false)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                interaction.clicked_header = paint_header_row(ui, view, total_width);
+                paint_header_row(ui, view, total_width, &mut interaction);
             });
 
         let body = egui::ScrollArea::both()
@@ -153,7 +168,7 @@ fn visible_columns<'a>(ui: &Ui, row_rect: Rect, view: &'a ResultTableView) -> im
         .filter(move |(_, cell_rect)| cell_rect.right() >= clip.left() && cell_rect.left() <= clip.right())
 }
 
-fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32) -> Option<usize> {
+fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32, interaction: &mut ResultTableInteraction) {
     let palette = view.palette;
     let (row_rect, _) = ui.allocate_exact_size(egui::vec2(total_width, HEADER_HEIGHT), Sense::hover());
     let painter = ui.painter();
@@ -166,11 +181,36 @@ fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32) -> Op
         palette.text_muted,
     );
 
-    let mut clicked_header = None;
+    let mut resizing_column = None;
     for (column_index, cell_rect) in visible_columns(ui, row_rect, view) {
         let column = &view.page.columns[column_index];
-        let response = ui.interact(cell_rect, ui.id().with(("header", column_index)), Sense::click());
-        if response.hovered() && view.is_sortable {
+        let resize_rect = Rect::from_min_max(
+            egui::pos2((cell_rect.right() - 4.0).max(cell_rect.left()), cell_rect.top()),
+            egui::pos2(cell_rect.right() + 3.0, cell_rect.bottom()),
+        );
+        let resize_resp = ui.interact(
+            resize_rect,
+            ui.id().with(("header_resize", view.tab_id, column_index)),
+            Sense::click_and_drag(),
+        );
+        let is_resizing = resize_resp.hovered() || resize_resp.dragged();
+        if is_resizing {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            resizing_column = Some(cell_rect.right() - 0.5);
+        }
+        if resize_resp.double_clicked() {
+            interaction.autofit_column = Some(column_index);
+        } else if resize_resp.dragged() {
+            let new_width = (cell_rect.width() + resize_resp.drag_delta().x).clamp(48.0, 720.0);
+            interaction.resized_column = Some((column_index, new_width));
+        }
+
+        let click_rect = Rect::from_min_max(
+            cell_rect.min,
+            egui::pos2((cell_rect.right() - 4.0).max(cell_rect.left()), cell_rect.bottom()),
+        );
+        let response = ui.interact(click_rect, ui.id().with(("header", view.tab_id, column_index)), Sense::click());
+        if response.hovered() && view.is_sortable && !is_resizing {
             ui.painter().rect_filled(cell_rect, 0.0, palette.bg_hover);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -196,18 +236,20 @@ fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32) -> Op
         );
         ui.painter().galley(text_pos, galley, palette.text_primary);
         if response.clicked() {
-            clicked_header = Some(column_index);
+            interaction.clicked_header = Some(column_index);
         }
-        response.on_hover_text(&column.type_name);
+        response.on_hover_text(format!("{} · Drag right edge to resize", column.type_name));
     }
 
     paint_grid_lines(ui, view, row_rect);
+    if let Some(x) = resizing_column {
+        ui.painter().vline(x, row_rect.y_range(), Stroke::new(2.0, palette.accent));
+    }
     ui.painter().hline(
         row_rect.x_range(),
         row_rect.bottom() - 0.5,
         Stroke::new(1.0, palette.border),
     );
-    clicked_header
 }
 
 fn paint_body_row(
@@ -237,6 +279,11 @@ fn paint_body_row(
         let mode = RowSelectMode::from_modifiers(ui.input(|input| input.modifiers));
         action = Some(TableAction::SelectRow { row, mode });
     }
+    number_response.context_menu(|ui| {
+        if let Some(menu_action) = render_cell_context_menu(ui, view, row, 0) {
+            action = Some(menu_action);
+        }
+    });
     ui.painter().text(
         egui::pos2(row_rect.left() + ROW_NUMBER_WIDTH - CELL_PADDING_X, row_rect.center().y),
         Align2::RIGHT_CENTER,

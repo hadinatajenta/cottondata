@@ -7,6 +7,7 @@ mod modals;
 mod navigator;
 mod query_actions;
 mod query_tab;
+mod record_view;
 mod result_table;
 mod row_selection;
 mod server_form;
@@ -122,7 +123,7 @@ impl CottonDataApp {
             sql_preview_modal: None,
             unsaved_guard_modal: None,
             after_save_action: None,
-            editor_height: 190.0,
+            editor_height: 220.0,
             toast_banner: None,
             expanded_servers: [false; SERVER_SLOT_CAPACITY],
             expanded_schemas: HashMap::new(),
@@ -264,12 +265,17 @@ impl CottonDataApp {
             || self.unsaved_guard_modal.is_some();
         let is_editing_cell = self.tabs[self.active_tab_idx].inline_editor.is_some();
         let mut run_query = false;
+        let mut run_all_queries = false;
         let mut new_console = false;
         let mut close_active = false;
         let mut chosen_slot = None;
         ctx.input(|i| {
             if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::Enter) {
-                run_query = true;
+                if i.modifiers.shift {
+                    run_all_queries = true;
+                } else {
+                    run_query = true;
+                }
             }
             if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::T) {
                 new_console = true;
@@ -289,7 +295,9 @@ impl CottonDataApp {
                 }
             }
         });
-        if run_query {
+        if run_all_queries {
+            self.request_execute_active_tab(true);
+        } else if run_query {
             self.request_execute_active_tab(false);
         }
         if new_console {

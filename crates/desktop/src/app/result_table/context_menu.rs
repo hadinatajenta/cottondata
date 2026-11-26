@@ -25,7 +25,76 @@ pub(super) fn render_cell_context_menu(
         1
     };
     let row_noun = if target_row_count == 1 { "row" } else { "rows" };
-    ui.set_min_width(220.0);
+    ui.set_min_width(240.0);
+
+    if menu_item(
+        ui,
+        icon_text(
+            icon::ROWS,
+            palette.accent,
+            "View row as list (Record view)",
+            palette.text_primary,
+            13.0,
+        ),
+        "",
+    ) {
+        action = Some(TableAction::OpenRecordView { row });
+    }
+    let selected_rows = view.row_selection.sorted_rows_below(view.page.row_count);
+    if selected_rows.len() == 2
+        && menu_item(
+            ui,
+            icon_text(
+                icon::FLOW_ARROW,
+                palette.accent,
+                &format!("Compare rows #{} vs #{}", selected_rows[0] + 1, selected_rows[1] + 1),
+                palette.text_primary,
+                13.0,
+            ),
+            "",
+        )
+    {
+        action = Some(TableAction::CompareSelectedRows(selected_rows[0], selected_rows[1]));
+    }
+    if view.is_sortable && row < view.page.row_count {
+        if let Some(col_meta) = view.page.columns.get(column) {
+            if menu_item(
+                ui,
+                icon_text(
+                    icon::FUNNEL,
+                    palette.accent,
+                    &format!("Filter by {} = value", col_meta.name),
+                    palette.text_primary,
+                    13.0,
+                ),
+                "",
+            ) {
+                action = Some(TableAction::QuickFilterValue {
+                    row,
+                    column,
+                    negate: false,
+                });
+            }
+            if menu_item(
+                ui,
+                icon_text(
+                    icon::FUNNEL,
+                    palette.text_muted,
+                    &format!("Exclude {} != value", col_meta.name),
+                    palette.text_primary,
+                    13.0,
+                ),
+                "",
+            ) {
+                action = Some(TableAction::QuickFilterValue {
+                    row,
+                    column,
+                    negate: true,
+                });
+            }
+        }
+    }
+    ui.separator();
 
     let is_column_editable = view.editability.is_column_editable(column);
     let is_existing_row = row < view.page.row_count;
@@ -134,6 +203,19 @@ pub(super) fn render_cell_context_menu(
         "",
     ) {
         action = Some(TableAction::CopyValue { row, column });
+    }
+    if menu_item(
+        ui,
+        icon_text(
+            icon::CODE,
+            palette.text_muted,
+            "Copy column as IN (…)",
+            palette.text_primary,
+            13.0,
+        ),
+        "",
+    ) {
+        action = Some(TableAction::CopyColumnAsIn { row, column });
     }
     ui.separator();
     for (format, shortcut) in ROW_COPY_FORMATS {

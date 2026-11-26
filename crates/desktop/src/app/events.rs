@@ -1,8 +1,10 @@
-use super::query_tab::BottomDeckTab;
+use super::query_tab::{result_set_label, BottomDeckTab, StoredResultSet};
+use super::row_selection::RowSelection;
 use super::CottonDataApp;
 use crate::worker::{SlotCmd, WorkerEvent};
 use cottondata_core::ConnectionStatus;
 use cottondata_driver::QueryOutcome;
+use cottondata_grid::StagedMutator;
 use cottondata_storage::ConnectedServerState;
 
 impl CottonDataApp {
@@ -159,9 +161,35 @@ impl CottonDataApp {
                                     true,
                                 );
                                 let evicted = self.memory_budget.record_allocation(format!("tab-{}", tab.id), bytes);
+                                let status_msg = tab.last_status_msg.clone();
+                                if tab.result_sets.len() > 1 && tab.active_result_idx < tab.result_sets.len() {
+                                    let idx = tab.active_result_idx;
+                                    tab.result_sets[idx] = StoredResultSet {
+                                        label: result_set_label(&page, idx),
+                                        page: page.clone(),
+                                        status_msg,
+                                        mutator: StagedMutator::new(),
+                                        column_widths: Vec::new(),
+                                        selected_cell: None,
+                                        row_selection: RowSelection::default(),
+                                    };
+                                } else {
+                                    tab.result_sets = vec![StoredResultSet {
+                                        label: result_set_label(&page, 0),
+                                        page: page.clone(),
+                                        status_msg,
+                                        mutator: StagedMutator::new(),
+                                        column_widths: Vec::new(),
+                                        selected_cell: None,
+                                        row_selection: RowSelection::default(),
+                                    }];
+                                    tab.active_result_idx = 0;
+                                }
                                 tab.page = Some(page);
                                 tab.column_widths.clear();
                                 tab.row_selection.clear();
+                                tab.record_view = None;
+                                tab.diff_rows = None;
                                 self.evict_pages(&evicted);
                             }
                             QueryOutcome::Affected {
@@ -182,6 +210,112 @@ impl CottonDataApp {
                                     self.storage
                                         .record_history(srv_name, cur_schema, executed_sql, elapsed_ms, true);
                             }
+                        }
+                    }
+                    self.bottom_tab = BottomDeckTab::DataGrid;
+                }
+                WorkerEvent::ScriptFinished {
+                    slot,
+                    tab_id,
+                    outcomes,
+                    runtime,
+                } => {
+                    let srv_name = self
+                        .registry
+                        .get(slot)
+                        .map(|s| s.profile.name.clone())
+                        .unwrap_or_else(|| slot.to_string());
+                    let cur_schema = runtime.current_schema.clone();
+                    let schema_changed = self
+                        .registry
+                        .get(slot)
+                        .and_then(|s| s.runtime.as_ref())
+                        .map(|r| r.current_schema != cur_schema)
+                        .unwrap_or(false);
+                    if let Some(s) = self.registry.get_mut(slot) {
+                        s.runtime = Some(runtime);
+                    }
+                    if schema_changed {
+                        self.mark_session_dirty();
+                    }
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.is_running = false;
+                        tab.mutator.revert_all();
+                        tab.inline_editor = None;
+                        tab.selected_cell = None;
+                        let mut stored_sets = Vec::new();
+                        let mut total_bytes = 0usize;
+                        let mut affected_summary = Vec::new();
+                        let mut total_ms = 0u64;
+                        for outcome in outcomes {
+                            match outcome {
+                                QueryOutcome::Rows(page) => {
+                                    let bytes = page.approx_bytes();
+                                    total_bytes += bytes;
+                                    total_ms += page.elapsed_ms;
+                                    let more = if page.has_more_rows { "+" } else { "" };
+                                    let status_msg = format!(
+                                        "{}{} rows · {} cols · {} ms · {:.1} KiB",
+                                        page.row_count,
+                                        more,
+                                        page.columns.len(),
+                                        page.elapsed_ms,
+                                        bytes as f64 / 1024.0
+                                    );
+                                    self.history = self.storage.record_history(
+                                        srv_name.clone(),
+                                        cur_schema.clone(),
+                                        page.executed_sql.clone(),
+                                        page.elapsed_ms,
+                                        true,
+                                    );
+                                    let idx = stored_sets.len();
+                                    stored_sets.push(StoredResultSet {
+                                        label: result_set_label(&page, idx),
+                                        page,
+                                        status_msg,
+                                        mutator: StagedMutator::new(),
+                                        column_widths: Vec::new(),
+                                        selected_cell: None,
+                                        row_selection: RowSelection::default(),
+                                    });
+                                }
+                                QueryOutcome::Affected {
+                                    affected_rows,
+                                    elapsed_ms,
+                                    executed_sql,
+                                    ..
+                                } => {
+                                    total_ms += elapsed_ms;
+                                    affected_summary.push(format!("{affected_rows} rows affected"));
+                                    self.history = self.storage.record_history(
+                                        srv_name.clone(),
+                                        cur_schema.clone(),
+                                        executed_sql,
+                                        elapsed_ms,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                        if !stored_sets.is_empty() {
+                            let count = stored_sets.len();
+                            tab.set_result_sets(stored_sets);
+                            let evicted = self
+                                .memory_budget
+                                .record_allocation(format!("tab-{}", tab.id), total_bytes);
+                            self.evict_pages(&evicted);
+                            if count > 1 {
+                                self.toast_banner = Some((
+                                    format!("Executed script: {count} result tabs ready ({total_ms} ms)"),
+                                    false,
+                                ));
+                            }
+                        } else if !affected_summary.is_empty() {
+                            tab.last_status_msg = format!(
+                                "Script OK · {} ({total_ms} ms)",
+                                affected_summary.join(" · ")
+                            );
                         }
                     }
                     self.bottom_tab = BottomDeckTab::DataGrid;
@@ -311,6 +445,8 @@ impl CottonDataApp {
                 if let Ok(tid) = id_str.parse::<u64>() {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tid) {
                         tab.page = None;
+                        tab.result_sets.clear();
+                        tab.active_result_idx = 0;
                         tab.last_status_msg =
                             "Page evicted by the 32 MiB RAM budget. Run or reload to fetch it again".into();
                     }

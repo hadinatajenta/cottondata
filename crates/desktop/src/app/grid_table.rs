@@ -1,4 +1,6 @@
-use super::result_table::{compute_column_widths, render_result_table, ResultTableView};
+use super::result_table::{
+    compute_column_widths, compute_single_column_width, render_result_table, ResultTableView,
+};
 use super::{CottonDataApp, PendingDiscardAction};
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
@@ -26,9 +28,16 @@ impl CottonDataApp {
         self.handle_table_shortcuts(ui.ctx(), &editability);
         let mut pending_action = None;
         let active_tab = &self.tabs[self.active_tab_idx];
-        let has_selected = active_tab.selected_cell.is_some() && active_tab.is_inspector_open;
-        let inspector_w = if has_selected { 300.0 } else { 0.0 };
-        let grid_w = (ui.available_width() - inspector_w - 8.0).max(300.0);
+        let has_record_view = active_tab.record_view.is_some() && active_tab.page.is_some();
+        let has_selected = !has_record_view && active_tab.selected_cell.is_some() && active_tab.is_inspector_open;
+        let side_w = if has_record_view {
+            420.0
+        } else if has_selected {
+            300.0
+        } else {
+            0.0
+        };
+        let grid_w = (ui.available_width() - side_w - if side_w > 0.0 { 8.0 } else { 0.0 }).max(260.0);
 
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -48,6 +57,7 @@ impl CottonDataApp {
                     if tab.column_widths.len() != page.columns.len() {
                         tab.column_widths = compute_column_widths(ui, page);
                     }
+                    let is_sortable = bound_table.is_some() && !tab.is_running;
                     let view = ResultTableView {
                         palette: p,
                         tab_id: tab.id,
@@ -58,20 +68,41 @@ impl CottonDataApp {
                         selected_row_count: tab.row_selection.sorted_rows_below(page.row_count).len(),
                         column_widths: &tab.column_widths,
                         order_by: tab.filter_sort.order_by.as_ref(),
-                        is_sortable: bound_table.is_some() && !tab.is_running,
+                        is_sortable,
                         editability: &editability,
                     };
                     let interaction = render_result_table(ui, &view, tab.inline_editor.as_mut());
-                    if let Some(column_index) = interaction.clicked_header.filter(|_| view.is_sortable) {
+                    if let Some((col_idx, new_w)) = interaction.resized_column {
+                        if let Some(slot_w) = tab.column_widths.get_mut(col_idx) {
+                            *slot_w = new_w;
+                        }
+                    }
+                    if let Some(col_idx) = interaction.autofit_column {
+                        let fit_w = compute_single_column_width(ui, page, col_idx);
+                        if let Some(slot_w) = tab.column_widths.get_mut(col_idx) {
+                            *slot_w = fit_w;
+                        }
+                    }
+                    if let Some(column_index) = interaction.clicked_header.filter(|_| is_sortable) {
                         clicked_sort_col = Some(page.columns[column_index].name.clone());
                     }
                     pending_action = interaction.action;
                 },
             );
 
-            if has_selected {
+            if has_record_view {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(inspector_w, available_h),
+                    egui::vec2(side_w, available_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if let Some(req) = self.render_record_view_drawer(ui, p, available_h, &editability) {
+                            load_full_cell_req = Some(req);
+                        }
+                    },
+                );
+            } else if has_selected {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(side_w, available_h),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         inset_frame(p).inner_margin(egui::Margin::same(10)).show(ui, |ui| {

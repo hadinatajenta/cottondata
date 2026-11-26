@@ -26,6 +26,11 @@ pub enum SlotCmd {
         sql: String,
         max_rows: u32,
     },
+    ExecuteScript {
+        tab_id: u64,
+        statements: Vec<String>,
+        max_rows: u32,
+    },
     LoadTablePage {
         tab_id: u64,
         schema: String,
@@ -96,6 +101,12 @@ pub enum WorkerEvent {
         slot: ServerSlotId,
         tab_id: u64,
         outcome: QueryOutcome,
+        runtime: ServerRuntimeInfo,
+    },
+    ScriptFinished {
+        slot: ServerSlotId,
+        tab_id: u64,
+        outcomes: Vec<QueryOutcome>,
         runtime: ServerRuntimeInfo,
     },
     RowCountLoaded {
@@ -350,6 +361,57 @@ fn slot_worker_loop(
                             catalog = SchemaCatalog::new();
                             emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
                         }
+                    }
+                }
+            }
+            SlotCmd::ExecuteScript {
+                tab_id,
+                statements,
+                max_rows,
+            } => {
+                let Some(sess) = session.as_mut() else {
+                    emit(
+                        &tx,
+                        &ctx,
+                        WorkerEvent::Error {
+                            slot,
+                            tab_id: Some(tab_id),
+                            error: DbError::message("Connect to this server first."),
+                        },
+                    );
+                    continue;
+                };
+                let mut outcomes = Vec::with_capacity(statements.len());
+                let mut script_error = None;
+                for sql in statements {
+                    match sess.execute_sql(&sql, max_rows) {
+                        Ok(outcome) => outcomes.push(outcome),
+                        Err(error) => {
+                            script_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                let runtime = sess.runtime().clone();
+                if !outcomes.is_empty() {
+                    emit(
+                        &tx,
+                        &ctx,
+                        WorkerEvent::ScriptFinished {
+                            slot,
+                            tab_id,
+                            outcomes,
+                            runtime,
+                        },
+                    );
+                }
+                if let Some(error) = script_error {
+                    let lost = error.is_connection_lost;
+                    emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
+                    if lost {
+                        session = None;
+                        catalog = SchemaCatalog::new();
+                        emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
                     }
                 }
             }

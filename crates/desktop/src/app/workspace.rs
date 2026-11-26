@@ -43,17 +43,24 @@ impl CottonDataApp {
                         });
                     });
 
-                    let (splitter_rect, splitter_resp) =
-                        ui.allocate_exact_size(egui::vec2(ui.available_width(), f32::from(GUTTER)), egui::Sense::drag());
-                    if splitter_resp.hovered() || splitter_resp.dragged() {
+                    let (splitter_rect, splitter_resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 12.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let is_active_drag = splitter_resp.hovered() || splitter_resp.dragged();
+                    if is_active_drag {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                        let handle = egui::Rect::from_center_size(splitter_rect.center(), egui::vec2(48.0, 3.0));
-                        ui.painter().rect_filled(handle, CornerRadius::same(2), palette.accent);
                     }
-                    if splitter_resp.dragged() {
-                        let max_h = (ctx.screen_rect().height() * 0.55).max(200.0);
-                        self.editor_height = (self.editor_height + splitter_resp.drag_delta().y).clamp(90.0, max_h);
+                    let grip_color = if is_active_drag { palette.accent } else { palette.border };
+                    let handle = egui::Rect::from_center_size(splitter_rect.center(), egui::vec2(56.0, 4.0));
+                    ui.painter().rect_filled(handle, CornerRadius::same(2), grip_color);
+                    if splitter_resp.double_clicked() {
+                        self.editor_height = 220.0;
+                    } else if splitter_resp.dragged() {
+                        let max_h = (ctx.screen_rect().height() * 0.70).max(280.0);
+                        self.editor_height = (self.editor_height + splitter_resp.drag_delta().y).clamp(100.0, max_h);
                     }
+                    splitter_resp.on_hover_text("Drag to resize SQL editor height · Double-click to reset");
 
                     card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
                         ui.set_min_size(ui.available_size());

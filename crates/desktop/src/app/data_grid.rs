@@ -1,8 +1,9 @@
+use super::query_tab::RecordViewState;
 use super::{CottonDataApp, PendingDiscardAction};
 use crate::theme::Palette;
 use crate::ui_kit::{
-    busy_indicator, caption, ghost_button, icon, icon_button, icon_text, pill, primary_button, tinted_ghost_button,
-    toolbar_divider,
+    busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_text, pill, primary_button,
+    tinted_ghost_button, toolbar_divider,
 };
 use crate::worker::SlotCmd;
 use cottondata_core::EnvironmentTag;
@@ -23,6 +24,46 @@ impl CottonDataApp {
             .and_then(|s| self.registry.get(s))
             .is_some_and(|sl| sl.profile.environment == EnvironmentTag::Production);
         let bound_table = self.tabs[self.active_tab_idx].bound_table.clone();
+
+        if self.tabs[self.active_tab_idx].result_sets.len() > 1 {
+            let mut switch_to = None;
+            let mut close_idx = None;
+            egui::ScrollArea::horizontal()
+                .id_salt(("result_subtabs", self.tabs[self.active_tab_idx].id))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let tab = &self.tabs[self.active_tab_idx];
+                        for (idx, rs) in tab.result_sets.iter().enumerate() {
+                            let is_active = idx == tab.active_result_idx;
+                            let is_dirty = if is_active {
+                                tab.mutator.has_changes()
+                            } else {
+                                rs.mutator.has_changes()
+                            };
+                            let label = if is_dirty {
+                                format!("• {}", rs.label)
+                            } else {
+                                rs.label.clone()
+                            };
+                            let resp = document_tab(ui, p, icon::TABLE, &label, is_active, true, None);
+                            if resp.is_close_clicked {
+                                close_idx = Some(idx);
+                            } else if resp.is_clicked {
+                                switch_to = Some(idx);
+                            }
+                        }
+                    });
+                });
+            ui.separator();
+            if let Some(idx) = switch_to {
+                self.tabs[self.active_tab_idx].switch_result_set(idx);
+            }
+            if let Some(idx) = close_idx {
+                self.tabs[self.active_tab_idx].close_result_set(idx);
+            }
+        }
+
         let editability = self.resolve_active_tab_editability();
 
         ui.horizontal_wrapped(|ui| {
@@ -170,6 +211,26 @@ impl CottonDataApp {
                 caption(ui, p, "Read-only").on_hover_text(reason.message());
             }
 
+            toolbar_divider(ui, p);
+            let record_open = tab.record_view.is_some();
+            let record_label = if record_open { "Hide list" } else { "Row list" };
+            if ghost_button(ui, p, icon::ROWS, record_label, true)
+                .on_hover_text("View selected row vertically as a list (Record view)")
+                .clicked()
+            {
+                if record_open {
+                    tab.record_view = None;
+                } else {
+                    let row = tab.selected_cell.map(|(r, _)| r).unwrap_or(0);
+                    tab.is_inspector_open = false;
+                    tab.record_view = Some(RecordViewState {
+                        row,
+                        filter: String::new(),
+                        hide_nulls: false,
+                        pretty_json: true,
+                    });
+                }
+            }
             toolbar_divider(ui, p);
             egui::ComboBox::from_id_salt("export_menu")
                 .selected_text(icon_text(icon::EXPORT, p.accent, "Export", p.text_primary, 13.0))
