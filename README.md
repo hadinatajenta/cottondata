@@ -76,7 +76,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.7.0
+# CottonData CLI v0.8.0
 open /Applications/CottonData.app
 ```
 
@@ -191,7 +191,8 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 - **Searchable History & Saved Queries / Snippets**: filter execution history by SQL, server, schema, or status without overwriting active consoles; save reusable SQL snippets (`Cmd/Ctrl+Shift+S`) with **Global** or **per-server** scope, folders, and pin-to-top.
 - **Result Grid, Foreign Key Navigation & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), **Foreign Key Navigation** (`Cmd+Click` or right-click outbound FK cells to jump to referenced rows + right-click *Find referencing rows* for inbound child tables), server-side `WHERE` filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
 - **DataGrip-style Inline Cell Editing**: edit cells directly inside table tabs and single-table `SELECT` console results (`Double-click`, `Enter`, `F2`, or type-to-edit). Tracks original column names (`org_name`), supports `NULL`/`DEFAULT`, lazy-loads >4 KiB truncated cells, commits atomically (using `SAVEPOINT` inside open transactions), saves directly with `Cmd/Ctrl+S` on non-PROD while requiring **SQL Preview** on `PROD`, and protects staged edits with an **Unsaved Changes** dialog.
-- **Copy and Streaming Full-Result Export**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`. Export the current page or **stream entire tables / full query results** directly to disk with constant RAM, live progress, and Cancel support.
+- **Copy, Streaming Export & CSV/JSON Import**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`. Export the current page or **stream entire tables / full query results** directly to disk with constant RAM, live progress, and Cancel support. Import **CSV / TSV / JSON / JSONL** files into any table via right-click with auto column mapping, full-file **Dry-Run validation**, and atomic batched transactional inserts.
+- **Table Structure Editor, Schema Compare & ER Diagram**: edit table columns, indexes, and foreign keys with live `ALTER TABLE` SQL preview; compare two schemas across servers (e.g., DEV vs STAGING) to inspect DDL diffs and generate migration scripts; explore interactive pan/zoom **ER Diagrams** per schema.
 - **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
 - **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, on focus loss, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
 - **Memory Guardrail**: all result grids share a 32 MiB budget with least-recently-used eviction.

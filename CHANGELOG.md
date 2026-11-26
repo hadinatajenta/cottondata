@@ -2,6 +2,17 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.8.0] — 2026-11-26
+
+### Added
+- **Table Structure Editor (`crates/sql/src/ddl_builder.rs`, `structure_editor.rs`)**: add, rename, modify, or drop columns, indexes, and foreign keys through a tabbed form with live syntax-highlighted `ALTER TABLE` SQL preview (MySQL & SQL Server), *Open in SQL Console*, and PROD safety confirmation.
+- **Streaming CSV / TSV / JSON / JSONL Import (`crates/grid/src/import.rs`, `import_modal.rs`)**: constant-memory file import wizard with RFC 4180 CSV/TSV & streaming JSON parsers, auto-column mapping, `Empty → NULL` controls, full-file **Dry-Run Validation** (NOT NULL & numeric checks), and batched multi-row `INSERT` execution inside an atomic transaction with live row progress and Cancel/rollback.
+- **Cross-Server Schema Compare (`crates/introspect/src/diff.rs`, `schema_compare.rs`)**: compare any two servers/schemas (e.g., DEV vs STAGING) to view new, modified, and extra tables, column/index/FK diffs, and generate a migration SQL script (with optional destructive `DROP` toggle) ready to open in SQL Console.
+- **Read-Only ER Diagram (`er_diagram.rs`)**: interactive pan/zoom schema ER diagram canvas displaying table cards with PK/FK badges and Bézier foreign key relationship lines, table search filter, relation highlighting on click, and double-click to open table data.
+
+### Fixed
+- **Windows & Linux cross-platform polish**: OS-aware shortcut hints (`Ctrl` / `Alt` on Windows/Linux instead of hardcoded macOS `⌘` / `⌥` in grid context menus), `CREATE_NO_WINDOW` flag for Windows SSH tunnel processes (`crates/driver/src/tunnel.rs`), and updated Windows binary metadata in `crates/desktop/build.rs`.
+
 ## [0.7.0] — 2026-11-26
 
 ### Added
