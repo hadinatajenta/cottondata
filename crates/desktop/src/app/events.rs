@@ -33,9 +33,11 @@ impl CottonDataApp {
                     }
                     self.reload_bound_tables_for_slot(slot);
                     self.persist_sessions_now();
-                    self.toast_banner = Some((format!("Connected to slot {slot}"), false));
+                    let label = self.slot_display_name(slot);
+                    self.notify_success(format!("Connected to {label}"));
                 }
                 WorkerEvent::Disconnected { slot } => {
+                    let label = self.slot_display_name(slot);
                     if let Some(s) = self.registry.get_mut(slot) {
                         s.status = ConnectionStatus::Disconnected;
                         s.runtime = None;
@@ -45,9 +47,10 @@ impl CottonDataApp {
                     self.health[slot.index()] = None;
                     self.clear_slot_activity(slot);
                     self.persist_sessions_now();
-                    self.toast_banner = Some((format!("Disconnected slot {slot}"), false));
+                    self.notify_info(format!("Disconnected from {label}"));
                 }
                 WorkerEvent::ConnectionLost { slot } => {
+                    let label = self.slot_display_name(slot);
                     let server_state = self.registry.get(slot).map(|s| {
                         (
                             s.profile.id.clone(),
@@ -69,11 +72,11 @@ impl CottonDataApp {
                                 active_schema,
                                 autocommit,
                             });
-                            self.toast_banner =
-                                Some((format!("Connection lost on slot {slot} — reconnecting…"), false));
+                            self.notify_warning(format!("Connection lost on {label} — reconnecting…"));
                             self.connect_slot_internal(slot, false);
                         } else if let Some(s) = self.registry.get_mut(slot) {
                             s.status = ConnectionStatus::Disconnected;
+                            self.notify_warning(format!("Connection lost on {label}"));
                         }
                     }
                 }
@@ -97,7 +100,7 @@ impl CottonDataApp {
                         }
                     }
                     self.after_save_action = None;
-                    self.toast_banner = Some((msg, true));
+                    self.notify_error(msg);
                 }
                 WorkerEvent::CatalogUpdated { slot, catalog } => {
                     self.catalogs[slot.index()] = Some(catalog);
@@ -118,6 +121,7 @@ impl CottonDataApp {
                     outcome,
                     runtime,
                 } => {
+                    self.clear_error_toast();
                     let srv_name = self
                         .registry
                         .get(slot)
@@ -305,10 +309,10 @@ impl CottonDataApp {
                                 .memory_budget
                                 .record_allocation(format!("tab-{}", tab.id), total_bytes);
                             self.evict_pages(&evicted);
+                            self.clear_error_toast();
                             if count > 1 {
-                                self.toast_banner = Some((
-                                    format!("Executed script: {count} result tabs ready ({total_ms} ms)"),
-                                    false,
+                                self.notify_success(format!(
+                                    "Executed script: {count} result tabs ready ({total_ms} ms)"
                                 ));
                             }
                         } else if !affected_summary.is_empty() {
@@ -316,6 +320,7 @@ impl CottonDataApp {
                                 "Script OK · {} ({total_ms} ms)",
                                 affected_summary.join(" · ")
                             );
+                            self.clear_error_toast();
                         }
                     }
                     self.bottom_tab = BottomDeckTab::DataGrid;
@@ -334,10 +339,7 @@ impl CottonDataApp {
                     statement_count,
                     elapsed_ms,
                 } => {
-                    self.toast_banner = Some((
-                        format!("Saved {statement_count} SQL mutation(s) in {elapsed_ms} ms"),
-                        false,
-                    ));
+                    self.notify_success(format!("Saved {statement_count} SQL mutation(s) in {elapsed_ms} ms"));
                     let max_rows = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
                     let pending_after = self.after_save_action.take();
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {

@@ -1,8 +1,9 @@
 use super::query_tab::BottomDeckTab;
-use super::CottonDataApp;
+use super::{CottonDataApp, ToastKind};
 use crate::theme::{Palette, GUTTER, RADIUS_CARD};
 use crate::ui_kit::{banner, caption, card_frame, document_tab, icon, icon_button, icon_text, underline_tab};
 use eframe::egui::{self, CornerRadius, Margin, Shape, Stroke};
+use std::time::{Duration, Instant};
 
 const RESULT_TABS: [(BottomDeckTab, &str, &str); 5] = [
     (BottomDeckTab::DataGrid, icon::ROWS, "Data Grid"),
@@ -21,14 +22,32 @@ impl CottonDataApp {
                     .inner_margin(Margin::same(GUTTER)),
             )
             .show(ctx, |ui| {
-                if let Some((message, is_error)) = self.toast_banner.clone() {
-                    let (tone, glyph) = if is_error {
-                        (palette.danger, icon::WARNING)
-                    } else {
-                        (palette.success, icon::CHECK_CIRCLE)
+                if let Some(toast) = self.toast_banner.clone() {
+                    let now = Instant::now();
+                    let (tone, glyph) = match toast.kind {
+                        ToastKind::Success => (palette.success, icon::CHECK_CIRCLE),
+                        ToastKind::Info => (palette.accent, icon::INFO),
+                        ToastKind::Warning => (palette.warning, icon::WARNING),
+                        ToastKind::Error => (palette.danger, icon::WARNING),
                     };
-                    if banner(ui, palette, tone, glyph, &message, true) {
+                    let state = banner(ui, palette, tone, glyph, &toast.message, true);
+                    if state.dismissed {
                         self.toast_banner = None;
+                    } else if state.hovered {
+                        if let Some(active) = self.toast_banner.as_mut() {
+                            active.created_at = now;
+                        }
+                        ctx.request_repaint_after(Duration::from_millis(250));
+                    } else if let Some(remaining) = toast.remaining(now) {
+                        if remaining.is_zero() {
+                            self.toast_banner = None;
+                            ctx.request_repaint();
+                        } else {
+                            ctx.request_repaint_after(remaining);
+                        }
+                    } else {
+                        self.toast_banner = None;
+                        ctx.request_repaint();
                     }
                     ui.add_space(f32::from(GUTTER));
                 }

@@ -59,7 +59,7 @@ impl CottonDataApp {
         let editability = self.resolve_active_tab_editability();
         let Some(target) = editability.target() else {
             if let Some(reason) = editability.reason() {
-                self.toast_banner = Some((reason.message().into(), true));
+                self.notify_error(reason.message());
             }
             return;
         };
@@ -98,7 +98,7 @@ impl CottonDataApp {
             Ok(_) => {}
             Err(err) => {
                 self.after_save_action = None;
-                self.toast_banner = Some((err, true));
+                self.notify_error(err);
             }
         }
     }
@@ -106,7 +106,7 @@ impl CottonDataApp {
     pub(super) fn request_load_full_cell(&mut self, row: usize, column: usize) {
         let editability = self.resolve_active_tab_editability();
         let Some(target) = editability.target() else {
-            self.toast_banner = Some(("Loading full cell value requires a primary/unique key.".into(), true));
+            self.notify_error("Loading full cell value requires a primary/unique key.");
             return;
         };
         let active_slot = self.tabs[self.active_tab_idx].slot.or(self.active_slot);
@@ -125,7 +125,7 @@ impl CottonDataApp {
         let pk_where = match target.build_key_where(dialect, page, row) {
             Ok(where_sql) => where_sql,
             Err(err) => {
-                self.toast_banner = Some((err, true));
+                self.notify_error(err);
                 return;
             }
         };
@@ -574,7 +574,7 @@ impl CottonDataApp {
             if is_nullable {
                 self.tabs[self.active_tab_idx].stage_cell_value(row, col, CellValue::Null);
             } else {
-                self.toast_banner = Some(("This column does not allow NULL values.".into(), true));
+                self.notify_error("This column does not allow NULL values.");
             }
             return;
         }
@@ -642,7 +642,7 @@ impl CottonDataApp {
         };
         let mut buffer = Vec::new();
         if let Err(err) = export_rows(page, &rows, format, &target, &mut buffer) {
-            self.toast_banner = Some((format!("Copy failed: {err}"), true));
+            self.notify_error(format!("Copy failed: {err}"));
             return;
         }
         ctx.copy_text(String::from_utf8_lossy(&buffer).into_owned());

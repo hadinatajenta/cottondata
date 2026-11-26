@@ -311,7 +311,7 @@ impl CottonDataApp {
                                     .save_password(&profile_id, &state.password, state.save_in_keychain);
                             }
                             if let Err(err) = self.storage.save_registry(&self.registry) {
-                                self.toast_banner = Some((format!("Could not save server list: {err}"), true));
+                                self.notify_error(format!("Could not save server list: {err}"));
                             }
                             self.active_slot = Some(slot_id);
                             keep_open = false;

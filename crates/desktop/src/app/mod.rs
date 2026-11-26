@@ -33,7 +33,7 @@ use server_form::ServerModalState;
 use sessions::SessionModalState;
 use settings_modal::SettingsModalState;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub(super) enum PendingDiscardAction {
@@ -41,6 +41,42 @@ pub(super) enum PendingDiscardAction {
     ReloadTablePage { page_index: u64 },
     SortColumn(String),
     RunQuery(bool),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToastKind {
+    Success,
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone)]
+pub(super) struct ToastBanner {
+    pub message: String,
+    pub kind: ToastKind,
+    pub created_at: Instant,
+    pub ttl: Duration,
+}
+
+impl ToastBanner {
+    pub(super) fn new(kind: ToastKind, message: impl Into<String>) -> Self {
+        let ttl = match kind {
+            ToastKind::Success | ToastKind::Info => Duration::from_secs(4),
+            ToastKind::Warning => Duration::from_secs(6),
+            ToastKind::Error => Duration::from_secs(10),
+        };
+        Self {
+            message: message.into(),
+            kind,
+            created_at: Instant::now(),
+            ttl,
+        }
+    }
+
+    pub(super) fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.ttl.checked_sub(now.saturating_duration_since(self.created_at))
+    }
 }
 
 pub struct CottonDataApp {
@@ -68,7 +104,7 @@ pub struct CottonDataApp {
     unsaved_guard_modal: Option<PendingDiscardAction>,
     after_save_action: Option<PendingDiscardAction>,
     editor_height: f32,
-    toast_banner: Option<(String, bool)>,
+    toast_banner: Option<ToastBanner>,
     expanded_servers: [bool; SERVER_SLOT_CAPACITY],
     expanded_schemas: HashMap<(usize, String), bool>,
     sessions_store: SessionsStore,
@@ -216,10 +252,48 @@ impl CottonDataApp {
         self.connect_slot_internal(slot, true);
     }
 
+    pub(super) fn slot_display_name(&self, slot: ServerSlotId) -> String {
+        self.registry
+            .get(slot)
+            .map(|s| format!("{slot} {}", s.profile.name))
+            .unwrap_or_else(|| slot.to_string())
+    }
+
+    pub(super) fn notify_success(&mut self, message: impl Into<String>) {
+        self.toast_banner = Some(ToastBanner::new(ToastKind::Success, message));
+    }
+
+    pub(super) fn notify_info(&mut self, message: impl Into<String>) {
+        self.toast_banner = Some(ToastBanner::new(ToastKind::Info, message));
+    }
+
+    pub(super) fn notify_warning(&mut self, message: impl Into<String>) {
+        self.toast_banner = Some(ToastBanner::new(ToastKind::Warning, message));
+    }
+
+    pub(super) fn notify_error(&mut self, message: impl Into<String>) {
+        self.toast_banner = Some(ToastBanner::new(ToastKind::Error, message));
+    }
+
+    pub(super) fn clear_toast(&mut self) {
+        self.toast_banner = None;
+    }
+
+    pub(super) fn clear_error_toast(&mut self) {
+        if self
+            .toast_banner
+            .as_ref()
+            .is_some_and(|toast| toast.kind == ToastKind::Error)
+        {
+            self.toast_banner = None;
+        }
+    }
+
     pub(super) fn connect_slot_internal(&mut self, slot: ServerSlotId, select_slot: bool) {
         let Some(profile) = self.registry.get(slot).map(|s| s.profile.clone()) else {
             return;
         };
+        let label = format!("{slot} {}", profile.name);
         let password = self.storage.get_password(&profile.id);
         self.desired_connected_ids.insert(profile.id.clone());
         if let Some(s) = self.registry.get_mut(slot) {
@@ -227,12 +301,14 @@ impl CottonDataApp {
         }
         if select_slot {
             self.active_slot = Some(slot);
+            self.notify_info(format!("Connecting to {label}…"));
         }
         self.hub.send(slot, SlotCmd::Connect { profile, password });
         self.persist_sessions_now();
     }
 
     pub(super) fn disconnect_slot(&mut self, slot: ServerSlotId) {
+        let label = self.slot_display_name(slot);
         if let Some(profile_id) = self.server_id_for_slot(slot) {
             self.desired_connected_ids.remove(&profile_id);
         }
@@ -242,6 +318,7 @@ impl CottonDataApp {
             s.runtime = None;
         }
         self.hub.send(slot, SlotCmd::Disconnect);
+        self.notify_info(format!("Disconnected from {label}"));
         self.persist_sessions_now();
     }
 
@@ -357,4 +434,23 @@ pub(super) fn insert_completion(sql: &mut String, cursor_byte: usize, completion
         .map(|idx| idx + 1)
         .unwrap_or(0);
     sql.replace_range(replace_start..clamped, completion);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toast_banner_expires_after_ttl_by_kind() {
+        let toast = ToastBanner::new(ToastKind::Success, "Connected to #1 Local");
+        assert_eq!(toast.ttl, Duration::from_secs(4));
+        assert!(toast.remaining(toast.created_at + Duration::from_secs(1)).is_some());
+        assert_eq!(toast.remaining(toast.created_at + Duration::from_secs(4)), Some(Duration::ZERO));
+        assert_eq!(toast.remaining(toast.created_at + Duration::from_secs(5)), None);
+
+        let err_toast = ToastBanner::new(ToastKind::Error, "Syntax error");
+        assert_eq!(err_toast.ttl, Duration::from_secs(10));
+        assert!(err_toast.remaining(err_toast.created_at + Duration::from_secs(9)).is_some());
+        assert_eq!(err_toast.remaining(err_toast.created_at + Duration::from_secs(11)), None);
+    }
 }

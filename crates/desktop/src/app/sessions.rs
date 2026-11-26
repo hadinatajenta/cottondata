@@ -284,7 +284,7 @@ impl CottonDataApp {
             self.restore_active_session(true);
             let _ = self.storage.save_sessions(&self.sessions_store);
             let name = self.sessions_store.active_session().name.clone();
-            self.toast_banner = Some((format!("Switched to session '{name}'"), false));
+            self.notify_info(format!("Switched to session '{name}'"));
         }
     }
 
@@ -306,9 +306,9 @@ impl CottonDataApp {
             }
         }
         if started > 0 {
-            self.toast_banner = Some((format!("Reconnecting {started} session server(s)…"), false));
+            self.notify_info(format!("Reconnecting {started} session server(s)…"));
         } else {
-            self.toast_banner = Some(("All session servers are already connected.".into(), false));
+            self.notify_info("All session servers are already connected.");
         }
     }
 
@@ -538,7 +538,7 @@ impl CottonDataApp {
                 }
                 SessionModalAction::SaveNow => {
                     self.persist_sessions_now();
-                    self.toast_banner = Some(("Workspace session saved.".into(), false));
+                    self.notify_success("Workspace session saved.");
                 }
             }
         }

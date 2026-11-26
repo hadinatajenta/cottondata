@@ -133,7 +133,7 @@ impl CottonDataApp {
         }
         if let Some(text) = requests.copy_text {
             ctx.copy_text(text.clone());
-            self.toast_banner = Some((format!("Copied `{text}`"), false));
+            self.notify_success(format!("Copied `{text}`"));
         }
     }
 }

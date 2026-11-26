@@ -129,24 +129,43 @@ pub fn status_dot(ui: &mut Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 3.5, color);
 }
 
-pub fn banner(ui: &mut Ui, palette: Palette, tone: Color32, glyph: &str, message: &str, is_dismissible: bool) -> bool {
-    let mut is_dismissed = false;
-    egui::Frame::new()
+pub struct BannerState {
+    pub dismissed: bool,
+    pub hovered: bool,
+}
+
+pub fn banner(
+    ui: &mut Ui,
+    palette: Palette,
+    tone: Color32,
+    glyph: &str,
+    message: &str,
+    is_dismissible: bool,
+) -> BannerState {
+    let mut dismissed = false;
+    let resp = egui::Frame::new()
         .fill(tone.gamma_multiply(0.1))
         .stroke(Stroke::new(1.0, tone.gamma_multiply(0.45)))
         .corner_radius(CornerRadius::same(RADIUS_CONTROL))
         .inner_margin(Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(icon_text(glyph, tone, message, palette.text_primary, 12.5));
-                if is_dismissible {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        is_dismissed = icon_button(ui, palette, icon::X, "Dismiss").clicked();
+            ui.set_min_width(ui.available_width());
+            if is_dismissible {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    dismissed = icon_button(ui, palette, icon::X, "Dismiss").clicked();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(icon_text(glyph, tone, message, palette.text_primary, 12.5)).wrap());
                     });
-                }
-            });
-        });
-    is_dismissed
+                });
+            } else {
+                ui.add(egui::Label::new(icon_text(glyph, tone, message, palette.text_primary, 12.5)).wrap());
+            }
+        })
+        .response;
+    BannerState {
+        dismissed,
+        hovered: resp.hovered(),
+    }
 }
 
 pub fn busy_indicator(ui: &mut Ui, palette: Palette, message: &str) {

@@ -55,11 +55,13 @@ impl CottonDataApp {
         }
         let slot = tab.slot.or(self.active_slot);
         let Some(slot) = slot else {
-            self.toast_banner = Some(("Add and connect a server first.".into(), true));
+            self.notify_error("Add and connect a server first.");
             return;
         };
         tab.slot = Some(slot);
         let max_rows = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
+        self.clear_toast();
+        let tab = &mut self.tabs[self.active_tab_idx];
 
         let statements: Vec<String> = if run_all {
             split_statements(&tab.sql)

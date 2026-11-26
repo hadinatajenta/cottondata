@@ -305,10 +305,10 @@ impl CottonDataApp {
         });
         match result {
             Ok(()) => {
-                self.toast_banner = Some((format!("Exported to {}", path.display()), false));
+                self.notify_success(format!("Exported to {}", path.display()));
             }
             Err(err) => {
-                self.toast_banner = Some((format!("Export failed: {err}"), true));
+                self.notify_error(format!("Export failed: {err}"));
             }
         }
     }

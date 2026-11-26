@@ -300,7 +300,7 @@ impl CottonDataApp {
         self.desired_connected_ids.remove(&removed.profile.id);
         self.storage.delete_password(&removed.profile.id);
         if let Err(err) = self.storage.save_registry(&self.registry) {
-            self.toast_banner = Some((format!("Could not save server list: {err}"), true));
+            self.notify_error(format!("Could not save server list: {err}"));
         }
         if self.active_slot == Some(slot_id) {
             self.active_slot = self.registry.iter().next().map(|slot| slot.slot_id);
