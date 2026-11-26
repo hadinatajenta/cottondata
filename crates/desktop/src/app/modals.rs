@@ -15,6 +15,10 @@ impl CottonDataApp {
         self.render_sessions_modal(ctx, p);
         self.render_snippet_modal(ctx, p);
         self.render_param_modal(ctx, p);
+        self.render_structure_editor_modal(ctx, p);
+        self.render_import_modal(ctx, p);
+        self.render_schema_compare_modal(ctx, p);
+        self.render_er_diagram_modal(ctx, p);
         self.render_row_diff_modal(ctx, p);
         self.render_unsaved_guard_modal(ctx, p);
         self.render_sql_preview_modal(ctx, p);

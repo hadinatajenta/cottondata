@@ -1,8 +1,10 @@
 use crate::drivers::{kill_running_query, open_session};
-use cottondata_core::{ServerProfile, ServerRuntimeInfo, ServerSlotId, SERVER_SLOT_CAPACITY};
+use cottondata_core::{DatabaseEngine, ServerProfile, ServerRuntimeInfo, ServerSlotId, SERVER_SLOT_CAPACITY};
 use cottondata_driver::{DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, ServerHealthMetrics};
-use cottondata_grid::{ExportFormat, PageFilterSort, StreamExporter};
-use cottondata_introspect::{SchemaCatalog, TableDetail};
+use cottondata_grid::{
+    stream_import_batches, ColumnMapping, ExportFormat, ImportFormat, PageFilterSort, StreamExporter, TargetColumnSpec,
+};
+use cottondata_introspect::{compare_schema_snapshots, snapshot_from_catalog, SchemaCatalog, SchemaDiff, TableDetail};
 use eframe::egui;
 use std::fs::File;
 use std::io::BufWriter;
@@ -163,6 +165,24 @@ pub enum WorkerEvent {
         path: PathBuf,
         result: Result<u64, String>,
         cancelled: bool,
+    },
+    ImportProgress {
+        rows_imported: u64,
+    },
+    ImportFinished {
+        slot: ServerSlotId,
+        schema: String,
+        table: String,
+        result: Result<u64, String>,
+        cancelled: bool,
+    },
+    SchemaCompared {
+        result: Result<SchemaDiff, String>,
+    },
+    SchemaErLoaded {
+        slot: ServerSlotId,
+        schema: String,
+        relations: Vec<(String, String, String, String, String)>,
     },
 }
 
@@ -364,6 +384,220 @@ impl WorkerHub {
                         path,
                         result,
                         cancelled,
+                    },
+                );
+            });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_file_async(
+        &self,
+        slot: ServerSlotId,
+        profile: ServerProfile,
+        password: Option<String>,
+        schema: String,
+        table: String,
+        path: PathBuf,
+        format: ImportFormat,
+        mappings: Vec<ColumnMapping>,
+        target_columns: Vec<TargetColumnSpec>,
+        batch_size: usize,
+        cancel_flag: Arc<AtomicBool>,
+    ) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-import".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let dialect = profile.engine.dialect();
+                let mut cancelled = false;
+                let result: Result<u64, String> = (|| {
+                    let mut session = open_session(&profile, password.as_deref()).map_err(|e| e.to_string())?;
+                    if !schema.is_empty() {
+                        session.set_schema(&schema).map_err(|e| e.to_string())?;
+                    }
+                    session.begin_transaction().map_err(|e| e.to_string())?;
+                    let mut total = 0u64;
+                    let stream_res = stream_import_batches(
+                        &path,
+                        format,
+                        dialect,
+                        &schema,
+                        &table,
+                        &mappings,
+                        &target_columns,
+                        batch_size,
+                        |sql, batch_rows| {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                cancelled = true;
+                                return Ok(false);
+                            }
+                            session.execute_sql(&sql, 1).map_err(|e| e.to_string())?;
+                            total += batch_rows as u64;
+                            emit(&ev_tx, &ctx, WorkerEvent::ImportProgress { rows_imported: total });
+                            Ok(true)
+                        },
+                    );
+                    match stream_res {
+                        Ok(_) if cancelled => {
+                            let _ = session.rollback();
+                            Ok(total)
+                        }
+                        Ok(_) => {
+                            session.commit().map_err(|e| e.to_string())?;
+                            Ok(total)
+                        }
+                        Err(err) => {
+                            let _ = session.rollback();
+                            Err(err)
+                        }
+                    }
+                })();
+                emit(
+                    &ev_tx,
+                    &ctx,
+                    WorkerEvent::ImportFinished {
+                        slot,
+                        schema,
+                        table,
+                        result,
+                        cancelled,
+                    },
+                );
+            });
+    }
+
+    pub fn compare_schemas_async(
+        &self,
+        src_profile: ServerProfile,
+        src_password: Option<String>,
+        src_schema: String,
+        dst_profile: ServerProfile,
+        dst_password: Option<String>,
+        dst_schema: String,
+    ) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-schema-compare".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let result = (|| -> Result<SchemaDiff, String> {
+                    let src_label = format!("{} / {}", src_profile.name, src_schema);
+                    let dst_label = format!("{} / {}", dst_profile.name, dst_schema);
+                    let mut src_sess = open_session(&src_profile, src_password.as_deref())
+                        .map_err(|e| format!("Source connection failed: {e}"))?;
+                    let mut dst_sess = open_session(&dst_profile, dst_password.as_deref())
+                        .map_err(|e| format!("Target connection failed: {e}"))?;
+                    let mut src_cat = SchemaCatalog::new();
+                    let mut dst_cat = SchemaCatalog::new();
+                    src_cat.introspect_l0(src_sess.as_mut()).map_err(|e| e.to_string())?;
+                    src_cat
+                        .introspect_schema_l1(src_sess.as_mut(), &src_schema)
+                        .map_err(|e| e.to_string())?;
+                    dst_cat.introspect_l0(dst_sess.as_mut()).map_err(|e| e.to_string())?;
+                    dst_cat
+                        .introspect_schema_l1(dst_sess.as_mut(), &dst_schema)
+                        .map_err(|e| e.to_string())?;
+
+                    let src_table_names: Vec<String> = snapshot_from_catalog(&src_cat, &src_schema)
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect();
+                    let dst_table_names: Vec<String> = snapshot_from_catalog(&dst_cat, &dst_schema)
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect();
+                    if src_table_names.len() <= 120 && dst_table_names.len() <= 120 {
+                        for name in &src_table_names {
+                            let _ = src_cat.introspect_table_l2(src_sess.as_mut(), &src_schema, name);
+                        }
+                        for name in &dst_table_names {
+                            let _ = dst_cat.introspect_table_l2(dst_sess.as_mut(), &dst_schema, name);
+                        }
+                    }
+
+                    let src_snap = snapshot_from_catalog(&src_cat, &src_schema);
+                    let dst_snap = snapshot_from_catalog(&dst_cat, &dst_schema);
+                    Ok(compare_schema_snapshots(src_label, dst_label, &src_snap, &dst_snap))
+                })();
+                emit(&ev_tx, &ctx, WorkerEvent::SchemaCompared { result });
+            });
+    }
+
+    pub fn load_schema_er_async(
+        &self,
+        slot: ServerSlotId,
+        profile: ServerProfile,
+        password: Option<String>,
+        schema: String,
+    ) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-er".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let mut relations = Vec::new();
+                if let Ok(mut session) = open_session(&profile, password.as_deref()) {
+                    let sql = match profile.engine {
+                        DatabaseEngine::MySql => {
+                            let escaped = schema.replace('\'', "''");
+                            format!(
+                                "SELECT constraint_name, table_name, column_name, \
+                                        referenced_table_name, referenced_column_name \
+                                 FROM information_schema.key_column_usage \
+                                 WHERE table_schema = '{escaped}' \
+                                   AND referenced_table_schema = '{escaped}' \
+                                   AND referenced_table_name IS NOT NULL \
+                                 ORDER BY table_name, constraint_name, ordinal_position"
+                            )
+                        }
+                        DatabaseEngine::SqlServer => {
+                            let db = format!("[{}]", schema.replace(']', "]]"));
+                            format!(
+                                "SELECT fk.name, ps.name + '.' + pt.name, pc.name, \
+                                        rs.name + '.' + rt.name, rc.name \
+                                 FROM {db}.sys.foreign_keys fk \
+                                 JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+                                 JOIN {db}.sys.objects pt ON pt.object_id = fkc.parent_object_id \
+                                 JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
+                                 JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+                                 JOIN {db}.sys.objects rt ON rt.object_id = fkc.referenced_object_id \
+                                 JOIN {db}.sys.schemas rs ON rs.schema_id = rt.schema_id \
+                                 JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+                                 ORDER BY pt.name, fk.name"
+                            )
+                        }
+                    };
+                    if let Ok(QueryOutcome::Rows(page)) = session.execute_sql(&sql, 4000) {
+                        for row in 0..page.row_count {
+                            if let (Some(c), Some(st), Some(sc), Some(rt), Some(rc)) = (
+                                page.cell_str(row, 0),
+                                page.cell_str(row, 1),
+                                page.cell_str(row, 2),
+                                page.cell_str(row, 3),
+                                page.cell_str(row, 4),
+                            ) {
+                                relations.push((
+                                    c.to_string(),
+                                    st.to_string(),
+                                    sc.to_string(),
+                                    rt.to_string(),
+                                    rc.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                emit(
+                    &ev_tx,
+                    &ctx,
+                    WorkerEvent::SchemaErLoaded {
+                        slot,
+                        schema,
+                        relations,
                     },
                 );
             });

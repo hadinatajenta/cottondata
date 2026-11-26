@@ -3,8 +3,15 @@ use crate::ui_kit::{icon, icon_text};
 use cottondata_grid::ExportFormat;
 use eframe::egui::{self, Ui};
 
+const COPY_TSV_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌘C" } else { "Ctrl+C" };
+const FK_CLICK_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌘Click" } else { "Ctrl+Click" };
+const SET_NULL_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌥⌘N" } else { "Alt+Ctrl+N" };
+const REVERT_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
+const CLONE_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌘D" } else { "Ctrl+D" };
+const SELECT_ALL_SHORTCUT: &str = if cfg!(target_os = "macos") { "⌘A" } else { "Ctrl+A" };
+
 const ROW_COPY_FORMATS: [(ExportFormat, &str); 5] = [
-    (ExportFormat::Tsv, "⌘C"),
+    (ExportFormat::Tsv, COPY_TSV_SHORTCUT),
     (ExportFormat::Csv, ""),
     (ExportFormat::JsonArray, ""),
     (ExportFormat::JsonLines, ""),
@@ -39,7 +46,7 @@ pub(super) fn render_cell_context_menu(
                     palette.text_primary,
                     13.0,
                 ),
-                "⌘Click",
+                FK_CLICK_SHORTCUT,
             ) {
                 action = Some(TableAction::NavigateFk {
                     target_schema: fk.ref_schema.clone(),
@@ -190,7 +197,7 @@ pub(super) fn render_cell_context_menu(
             && menu_item(
                 ui,
                 icon_text(icon::X_CIRCLE, palette.text_muted, "Set NULL", palette.text_primary, 13.0),
-                "⌥⌘N",
+                SET_NULL_SHORTCUT,
             )
         {
             action = Some(TableAction::SetCellNull { row, column });
@@ -220,7 +227,7 @@ pub(super) fn render_cell_context_menu(
                     palette.text_primary,
                     13.0,
                 ),
-                "⌘Z",
+                REVERT_SHORTCUT,
             )
         {
             action = Some(TableAction::RevertCell { row, column });
@@ -244,7 +251,7 @@ pub(super) fn render_cell_context_menu(
             if menu_item(
                 ui,
                 icon_text(icon::COPY, palette.text_muted, "Clone row", palette.text_primary, 13.0),
-                "⌘D",
+                CLONE_SHORTCUT,
             ) {
                 action = Some(TableAction::CloneRow { row });
             }
@@ -305,7 +312,7 @@ pub(super) fn render_cell_context_menu(
             palette.text_primary,
             13.0,
         ),
-        "⌘A",
+        SELECT_ALL_SHORTCUT,
     ) {
         action = Some(TableAction::SelectAll);
     }

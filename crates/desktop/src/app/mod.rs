@@ -1,7 +1,9 @@
 mod activity;
 mod data_grid;
+mod er_diagram;
 mod events;
 mod grid_table;
+mod import_modal;
 mod inspectors;
 mod modals;
 mod navigator;
@@ -11,12 +13,14 @@ mod query_tab;
 mod record_view;
 mod result_table;
 mod row_selection;
+mod schema_compare;
 mod server_form;
 mod servers_card;
 mod sessions;
 mod settings_modal;
 mod snippets;
 mod sql_editor;
+mod structure_editor;
 mod table_actions;
 mod top_bar;
 mod transaction_bar;
@@ -34,12 +38,16 @@ use cottondata_storage::{
     SnippetsStore,
 };
 use eframe::egui;
+use er_diagram::ErDiagramState;
+use import_modal::ImportModalState;
 use params_modal::ParamModalState;
 use query_tab::{BottomDeckTab, QueryTab};
+use schema_compare::SchemaCompareState;
 use server_form::ServerModalState;
 use sessions::SessionModalState;
 use settings_modal::SettingsModalState;
 use snippets::SnippetModalState;
+use structure_editor::StructureEditorState;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -133,6 +141,10 @@ pub struct CottonDataApp {
     snippet_modal: Option<SnippetModalState>,
     param_modal: Option<ParamModalState>,
     param_history: HashMap<u64, HashMap<String, ParamBinding>>,
+    structure_editor: Option<StructureEditorState>,
+    import_modal: Option<ImportModalState>,
+    schema_compare: Option<SchemaCompareState>,
+    er_diagram: Option<ErDiagramState>,
     modal: Option<ServerModalState>,
     session_modal: Option<SessionModalState>,
     settings_modal: Option<SettingsModalState>,
@@ -205,6 +217,10 @@ impl CottonDataApp {
             snippet_modal: None,
             param_modal: None,
             param_history: HashMap::new(),
+            structure_editor: None,
+            import_modal: None,
+            schema_compare: None,
+            er_diagram: None,
             modal: None,
             session_modal: None,
             settings_modal: None,
@@ -442,6 +458,10 @@ impl CottonDataApp {
             || self.settings_modal.is_some()
             || self.snippet_modal.is_some()
             || self.param_modal.is_some()
+            || self.structure_editor.is_some()
+            || self.import_modal.is_some()
+            || self.schema_compare.is_some()
+            || self.er_diagram.is_some()
             || self.sql_preview_modal.is_some()
             || self.unsaved_guard_modal.is_some()
             || self.tabs[self.active_tab_idx].diff_rows.is_some()

@@ -1,3 +1,4 @@
+use super::er_diagram::ErRelation;
 use super::query_tab::{result_set_label, BottomDeckTab, StoredResultSet};
 use super::row_selection::RowSelection;
 use super::server_form::ConnectionTestState;
@@ -503,6 +504,78 @@ impl CottonDataApp {
                         }
                         Err(err) => {
                             self.notify_error(format!("Stream export failed: {err}"));
+                        }
+                    }
+                }
+                WorkerEvent::ImportProgress { rows_imported } => {
+                    if let Some(modal) = self.import_modal.as_mut() {
+                        modal.imported_rows = rows_imported;
+                    }
+                }
+                WorkerEvent::ImportFinished {
+                    slot,
+                    schema,
+                    table,
+                    result,
+                    cancelled,
+                } => {
+                    match result {
+                        Ok(rows) if cancelled => {
+                            if let Some(modal) = self.import_modal.as_mut() {
+                                modal.is_running = false;
+                                modal.cancel_flag = None;
+                            }
+                            self.notify_warning(format!(
+                                "Import cancelled and rolled back ({rows} rows aborted)"
+                            ));
+                        }
+                        Ok(rows) => {
+                            self.import_modal = None;
+                            self.notify_success(format!("Imported {rows} row(s) into {schema}.{table}"));
+                            self.reload_bound_tables_for_slot(slot);
+                        }
+                        Err(err) => {
+                            if let Some(modal) = self.import_modal.as_mut() {
+                                modal.is_running = false;
+                                modal.cancel_flag = None;
+                                modal.error_msg = Some(err.clone());
+                            }
+                            self.notify_error(format!("Import failed (rolled back): {err}"));
+                        }
+                    }
+                }
+                WorkerEvent::SchemaCompared { result } => {
+                    if let Some(modal) = self.schema_compare.as_mut() {
+                        modal.is_comparing = false;
+                        match result {
+                            Ok(diff) => {
+                                modal.diff = Some(diff);
+                                modal.error_msg = None;
+                            }
+                            Err(err) => {
+                                modal.error_msg = Some(err);
+                            }
+                        }
+                    }
+                }
+                WorkerEvent::SchemaErLoaded {
+                    slot,
+                    schema,
+                    relations,
+                } => {
+                    if let Some(er) = self.er_diagram.as_mut() {
+                        if er.slot == slot && er.schema.eq_ignore_ascii_case(&schema) {
+                            let mapped = relations
+                                .into_iter()
+                                .map(|(c, st, sc, tt, tc)| ErRelation {
+                                    constraint_name: c,
+                                    source_table: st,
+                                    source_column: sc,
+                                    target_table: tt,
+                                    target_column: tc,
+                                })
+                                .collect();
+                            er.apply_relations(mapped);
                         }
                     }
                 }

@@ -17,6 +17,10 @@ pub(super) struct NavigatorRequests {
     pub(super) set_active_schema: Option<String>,
     pub(super) open_table: Option<(String, String)>,
     pub(super) load_table_detail: Option<(String, String)>,
+    pub(super) edit_structure: Option<(String, String)>,
+    pub(super) import_table: Option<(String, String)>,
+    pub(super) compare_schema: Option<String>,
+    pub(super) open_er_diagram: Option<String>,
     pub(super) generate_select: Option<(String, String)>,
     pub(super) copy_text: Option<String>,
 }
@@ -27,6 +31,10 @@ impl NavigatorRequests {
             && self.set_active_schema.is_none()
             && self.open_table.is_none()
             && self.load_table_detail.is_none()
+            && self.edit_structure.is_none()
+            && self.import_table.is_none()
+            && self.compare_schema.is_none()
+            && self.open_er_diagram.is_none()
             && self.generate_select.is_none()
             && self.copy_text.is_none()
     }
@@ -131,6 +139,22 @@ impl CottonDataApp {
                     },
                 );
             }
+        }
+        if let Some((schema, table)) = requests.edit_structure {
+            self.active_slot = Some(slot_id);
+            self.open_structure_editor(slot_id, schema, table);
+        }
+        if let Some((schema, table)) = requests.import_table {
+            self.active_slot = Some(slot_id);
+            self.open_import_modal(slot_id, schema, table);
+        }
+        if let Some(schema) = requests.compare_schema {
+            self.active_slot = Some(slot_id);
+            self.open_schema_compare(Some(slot_id), schema);
+        }
+        if let Some(schema) = requests.open_er_diagram {
+            self.active_slot = Some(slot_id);
+            self.open_er_diagram(slot_id, schema);
         }
         if let Some((schema, table)) = requests.generate_select {
             let dialect = self.slot_dialect(Some(slot_id));
@@ -252,6 +276,16 @@ fn render_schema_node(
                         requests.load_schema = Some(schema_name.to_string());
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button(format!("{}  Compare schema…", icon::FLOW_ARROW)).clicked() {
+                        requests.compare_schema = Some(schema_name.to_string());
+                        ui.close_menu();
+                    }
+                    if ui.button(format!("{}  View ER Diagram", icon::TREE_STRUCTURE)).clicked() {
+                        requests.open_er_diagram = Some(schema_name.to_string());
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button(format!("{}  Copy schema name", icon::COPY)).clicked() {
                         requests.copy_text = Some(schema_name.to_string());
                         ui.close_menu();
@@ -409,6 +443,14 @@ fn render_table_node(
                             }
                             if ui.button(format!("{}  Inspect DDL & Indexes", icon::CODE)).clicked() {
                                 requests.load_table_detail = Some((schema_name.to_string(), table_name.to_string()));
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("{}  Edit Table Structure…", icon::PENCIL_SIMPLE)).clicked() {
+                                requests.edit_structure = Some((schema_name.to_string(), table_name.to_string()));
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("{}  Import CSV / JSON…", icon::UPLOAD_SIMPLE)).clicked() {
+                                requests.import_table = Some((schema_name.to_string(), table_name.to_string()));
                                 ui.close_menu();
                             }
                             if ui

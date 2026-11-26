@@ -9,7 +9,7 @@ use cottondata_core::ServerSlotId;
 use eframe::egui::{self, FontFamily, FontId, RichText};
 
 impl CottonDataApp {
-    pub(super) fn render_ddl_view(&self, ui: &mut egui::Ui, p: Palette) {
+    pub(super) fn render_ddl_view(&mut self, ui: &mut egui::Ui, p: Palette) {
         let pending_detail = self
             .active_slot
             .and_then(|slot| self.slot_activity[slot.index()].loading_table_detail.as_ref());
@@ -17,6 +17,7 @@ impl CottonDataApp {
             loading_state(ui, p, &format!("Loading DDL for {schema}.{table}…"));
             return;
         }
+        let mut edit_structure_req: Option<(String, String)> = None;
         let Some((schema, table, detail)) = &self.ddl_view else {
             empty_state(
                 ui,
@@ -43,6 +44,13 @@ impl CottonDataApp {
             if let Some(rows) = detail.row_estimate {
                 caption(ui, p, format!("~{rows} rows"));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if secondary_button(ui, p, icon::PENCIL_SIMPLE, "Edit Structure…", self.active_slot.is_some())
+                    .clicked()
+                {
+                    edit_structure_req = Some((schema.clone(), table.clone()));
+                }
+            });
         });
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -131,6 +139,9 @@ impl CottonDataApp {
                 }
             }
         });
+        if let (Some(slot), Some((s, t))) = (self.active_slot, edit_structure_req) {
+            self.open_structure_editor(slot, s, t);
+        }
     }
 
     pub(super) fn render_explain_view(&self, ui: &mut egui::Ui, p: Palette) {

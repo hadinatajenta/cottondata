@@ -22,6 +22,11 @@ impl SshTunnel {
         };
 
         let mut cmd = Command::new("ssh");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
         cmd.arg("-N")
             .arg("-o")
             .arg("BatchMode=yes")

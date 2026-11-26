@@ -1,4 +1,5 @@
 pub mod complete;
+pub mod ddl_builder;
 pub mod edit;
 pub mod format;
 pub mod lexer;
@@ -6,6 +7,9 @@ pub mod params;
 pub mod safety;
 
 pub use complete::{CompletionItem, CompletionKind, CompletionProvider, SchemaTableHint};
+pub use ddl_builder::{
+    build_alter_table_statements, ColumnDraft, ForeignKeyDraft, IndexDraft, TableStructureEdit,
+};
 pub use edit::{
     duplicate_lines, find_matches, move_lines_down, move_lines_up, replace_all_matches,
     replace_match, toggle_line_comment, EditResult, SearchOptions,

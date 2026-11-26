@@ -8,7 +8,7 @@ fn main() {
         res.set("ProductName", "CottonData");
         res.set(
             "FileDescription",
-            "CottonData — Featherweight Native Rust MySQL Client (Max 10 Servers)",
+            "CottonData — Featherweight Native Rust SQL Client (MySQL & SQL Server)",
         );
         res.set("LegalCopyright", "MIT OR Apache-2.0");
         if let Err(err) = res.compile() {

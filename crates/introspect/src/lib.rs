@@ -1,3 +1,10 @@
+pub mod diff;
+
+pub use diff::{
+    compare_schema_snapshots, generate_migration_sql, snapshot_from_catalog, ColumnSnapshot,
+    SchemaDiff, TableDiff, TableSnapshot,
+};
+
 use cottondata_driver::{DatabaseSession, DbError, SchemaObjects, SchemaSummary};
 pub use cottondata_driver::{ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, TableDetail, TableKind};
 use cottondata_sql::SchemaTableHint;
