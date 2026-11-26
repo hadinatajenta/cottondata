@@ -1,4 +1,5 @@
 mod catalog;
+mod endpoint;
 mod error;
 mod tunnel;
 
@@ -6,6 +7,7 @@ pub use catalog::{
     ColumnSummary, ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects, SchemaSummary,
     TableDetail, TableKind, TableSummary,
 };
+pub use endpoint::{resolve_tcp_target, TcpTarget};
 pub use error::DbError;
 pub use tunnel::SshTunnel;
 
@@ -84,6 +86,12 @@ pub trait DatabaseSession: Send {
     fn execute_atomic_batch(&mut self, statements: &[String]) -> Result<u64, DbError>;
     fn explain(&mut self, sql: &str, analyze: bool) -> Result<ExplainResult, DbError>;
     fn fetch_processlist(&mut self) -> Result<Vec<ProcessEntry>, DbError>;
+    fn kill_process(&mut self, process_id: u64) -> Result<(), DbError> {
+        let Some(sql) = self.dialect().kill_process(process_id) else {
+            return Err(DbError::message("This database does not support cancelling other sessions"));
+        };
+        self.execute_sql(&sql, 1).map(|_| ())
+    }
     fn fetch_health_metrics(&mut self) -> Result<ServerHealthMetrics, DbError>;
     fn list_schemas(&mut self) -> Result<Vec<SchemaSummary>, DbError>;
     fn load_schema_objects(&mut self, schema: &str) -> Result<SchemaObjects, DbError>;

@@ -227,7 +227,9 @@ impl CottonDataApp {
                 self.registry.max_servers()
             )
         };
-        let subtitle = if state.use_unix_socket && state.engine.supports_unix_socket() {
+        let subtitle = if state.engine.is_file_based() {
+            format!("{} · {}", state.engine.label(), state.database_file)
+        } else if state.use_unix_socket && state.engine.supports_unix_socket() {
             format!("{} · {}", state.engine.label(), state.socket_path)
         } else {
             format!("{} · {}:{}", state.engine.label(), state.host, state.port)
@@ -451,30 +453,21 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
 
     section_heading(ui, p, "Database Engine");
     ui.add_space(6.0);
-    let card_w = (full_w - gap) / 2.0;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for engine in DatabaseEngine::ALL {
-            let subtitle = match engine {
-                DatabaseEngine::MySql => "MySQL 5.7+ / 8.x / MariaDB · Port 3306",
-                DatabaseEngine::SqlServer => "Microsoft SQL Server · Port 1433",
-            };
-            if option_card(
-                ui,
-                p,
-                icon::DATABASE,
-                engine.label(),
-                subtitle,
-                state.engine == engine,
-                card_w,
-            )
-            .clicked()
-            {
-                state.switch_engine(engine);
-                state.test_state = ConnectionTestState::Idle;
+    let cards_per_row = 3usize;
+    let card_w = (full_w - gap * (cards_per_row as f32 - 1.0)) / cards_per_row as f32;
+    for engine_row in DatabaseEngine::ALL.chunks(cards_per_row) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for &engine in engine_row {
+                let (glyph, subtitle) = engine_card_details(engine);
+                if option_card(ui, p, glyph, engine.label(), subtitle, state.engine == engine, card_w).clicked() {
+                    state.switch_engine(engine);
+                    state.test_state = ConnectionTestState::Idle;
+                }
             }
-        }
-    });
+        });
+        ui.add_space(6.0);
+    }
 
     ui.add_space(14.0);
     let name_w = (full_w - gap) * 0.56;
@@ -509,6 +502,10 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
     });
 
     ui.add_space(12.0);
+    if state.engine.is_file_based() {
+        render_database_file_field(ui, p, state, full_w);
+        return;
+    }
     if state.engine.supports_unix_socket() {
         ui.horizontal(|ui| {
             field_label(ui, p, "Transport");
@@ -525,7 +522,12 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
 
     if state.use_unix_socket && state.engine.supports_unix_socket() {
         field_label(ui, p, "Unix Socket Path");
-        styled_text_input(ui, p, "srv_socket", &mut state.socket_path, "/tmp/mysql.sock", full_w);
+        let socket_hint = if state.engine == DatabaseEngine::PostgreSql {
+            "/tmp/.s.PGSQL.5432 or /var/run/postgresql"
+        } else {
+            "/tmp/mysql.sock"
+        };
+        styled_text_input(ui, p, "srv_socket", &mut state.socket_path, socket_hint, full_w);
     } else {
         let port_w = 110.0;
         let host_w = (full_w - gap - port_w).max(140.0);
@@ -539,7 +541,8 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
             ui.vertical(|ui| {
                 ui.set_width(port_w);
                 field_label(ui, p, "Port");
-                styled_text_input(ui, p, "srv_port", &mut state.port, "3306", port_w);
+                let default_port = state.engine.default_port().to_string();
+                styled_text_input(ui, p, "srv_port", &mut state.port, &default_port, port_w);
             });
         });
     }
@@ -551,7 +554,8 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
         ui.vertical(|ui| {
             ui.set_width(half_w);
             field_label(ui, p, "Username");
-            styled_text_input(ui, p, "srv_user", &mut state.username, "root", half_w);
+            let default_user = state.engine.default_username();
+            styled_text_input(ui, p, "srv_user", &mut state.username, default_user, half_w);
         });
         ui.vertical(|ui| {
             ui.set_width(half_w);
@@ -573,12 +577,13 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
         ui.spacing_mut().item_spacing.x = gap;
         ui.vertical(|ui| {
             ui.set_width(half_w);
-            let schema_label = match state.engine {
-                DatabaseEngine::MySql => "Default Schema",
-                DatabaseEngine::SqlServer => "Default Database",
+            field_label(ui, p, state.engine.database_label());
+            let database_hint = match state.engine {
+                DatabaseEngine::PostgreSql => "postgres (default)",
+                DatabaseEngine::CockroachDb => "defaultdb (default)",
+                _ => "Optional",
             };
-            field_label(ui, p, schema_label);
-            styled_text_input(ui, p, "srv_schema", &mut state.default_schema, "Optional", half_w);
+            styled_text_input(ui, p, "srv_schema", &mut state.default_schema, database_hint, half_w);
         });
         ui.vertical(|ui| {
             ui.set_width(half_w);
@@ -594,9 +599,77 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
     });
 }
 
+fn engine_card_details(engine: DatabaseEngine) -> (&'static str, &'static str) {
+    match engine {
+        DatabaseEngine::MySql => (icon::DATABASE, "MySQL 5.7+ / 8.x / MariaDB · 3306"),
+        DatabaseEngine::PostgreSql => (icon::DATABASE, "PostgreSQL 9.6+ · Supabase · Neon · 5432"),
+        DatabaseEngine::SqlServer => (icon::DATABASE, "Microsoft SQL Server 2012+ · 1433"),
+        DatabaseEngine::CockroachDb => (icon::CLOUD, "CockroachDB self-hosted & Cloud · 26257"),
+        DatabaseEngine::Sqlite => (icon::FILE, "Local .db / .sqlite file · no server"),
+    }
+}
+
+const SQLITE_EXTENSIONS: [&str; 4] = ["db", "sqlite", "sqlite3", "db3"];
+
+fn render_database_file_field(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalState, full_w: f32) {
+    field_label(ui, p, "Database File");
+    let button_w = 96.0;
+    let path_w = (full_w - button_w * 2.0 - 16.0).max(160.0);
+    ui.horizontal(|ui| {
+        styled_text_input(
+            ui,
+            p,
+            "srv_sqlite_file",
+            &mut state.database_file,
+            "/path/to/app.db or :memory:",
+            path_w,
+        );
+        if secondary_button(ui, p, icon::FOLDER_OPEN, "Browse", true).clicked() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("SQLite database", &SQLITE_EXTENSIONS)
+                .add_filter("All files", &["*"])
+                .pick_file()
+            {
+                state.database_file = file.display().to_string();
+            }
+        }
+        if secondary_button(ui, p, icon::FILE_PLUS, "New", true)
+            .on_hover_text("Create a new empty SQLite database file")
+            .clicked()
+        {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("SQLite database", &SQLITE_EXTENSIONS)
+                .set_file_name("database.db")
+                .save_file()
+            {
+                state.database_file = file.display().to_string();
+            }
+        }
+    });
+    ui.add_space(6.0);
+    caption(
+        ui,
+        p,
+        "The file is created on first connect if it does not exist. Foreign keys are enforced (PRAGMA foreign_keys = ON).",
+    );
+    if state.name.trim().is_empty() {
+        if let Some(file_name) = std::path::Path::new(state.database_file.trim())
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        {
+            state.name = file_name;
+        }
+    }
+}
+
 fn render_security_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalState) {
     let full_w = ui.available_width();
     let gap = 10.0;
+
+    if state.engine.is_file_based() {
+        render_safety_section(ui, p, state);
+        return;
+    }
 
     section_heading(ui, p, "Transport Security (TLS)");
     ui.add_space(6.0);
@@ -637,6 +710,10 @@ fn render_security_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalSta
     }
 
     ui.add_space(12.0);
+    render_safety_section(ui, p, state);
+}
+
+fn render_safety_section(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalState) {
     section_heading(ui, p, "Safety & Paging");
     ui.add_space(6.0);
     toggle_card(
@@ -669,6 +746,11 @@ fn render_security_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalSta
 fn render_ssh_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalState) {
     let full_w = ui.available_width();
     let gap = 12.0;
+
+    if state.engine.is_file_based() {
+        caption(ui, p, "SQLite opens a local file, so an SSH tunnel does not apply.");
+        return;
+    }
 
     toggle_card(
         ui,

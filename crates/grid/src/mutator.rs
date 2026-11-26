@@ -331,7 +331,7 @@ fn format_sql_literal_for_meta(dialect: SqlDialect, val: &CellValue, meta: &crat
                 return trimmed.to_string();
             }
             if (meta.is_binary || is_binary_type_name(&meta.type_name)) && is_hex_literal(trimmed) {
-                return trimmed.to_string();
+                return dialect.binary_literal(&trimmed[2..]);
             }
             if meta.is_numeric && is_plain_number(trimmed) {
                 return trimmed.to_string();
@@ -361,7 +361,7 @@ fn is_hex_literal(s: &str) -> bool {
 
 fn is_binary_type_name(type_name: &str) -> bool {
     let lower = type_name.to_ascii_lowercase();
-    lower.contains("blob") || lower.contains("binary") || lower.contains("geometry")
+    lower.contains("blob") || lower.contains("binary") || lower.contains("bytea") || lower.contains("geometry")
 }
 
 fn is_plain_number(s: &str) -> bool {
@@ -577,5 +577,52 @@ mod tests {
 
         mutator.revert_row(0);
         assert!(!mutator.has_changes());
+    }
+
+    #[test]
+    fn postgres_and_sqlite_edits_use_standard_strings_no_limit_and_native_blob_literals() {
+        let column = |name: &str, type_name: &str, is_primary_key: bool, is_numeric: bool, is_binary: bool| ColumnMeta {
+            name: name.into(),
+            org_name: Some(name.into()),
+            table: Some("files".into()),
+            schema: Some("public".into()),
+            type_name: type_name.into(),
+            is_primary_key,
+            is_unique_key: false,
+            is_nullable: !is_primary_key,
+            is_auto_increment: false,
+            is_numeric,
+            is_binary,
+        };
+        let cols = vec![
+            column("id", "int8", true, true, false),
+            column("path", "text", false, false, false),
+            column("raw", "bytea", false, false, true),
+        ];
+        let mut page = ColumnarPage::new(cols, "SELECT 1".into());
+        page.push_row(&[
+            CellValue::Text("3".into()),
+            CellValue::Text("old".into()),
+            CellValue::Null,
+        ]);
+        let mut mutator = StagedMutator::new();
+        mutator.set_cell(&page, 0, 1, CellValue::Text("C:\\it's".into()));
+        mutator.set_cell(&page, 0, 2, CellValue::Text("0x0AFF".into()));
+
+        let postgres = mutator
+            .build_pending_sql(SqlDialect::PostgreSql, &page, "public", "files", &["id".into()])
+            .unwrap();
+        assert_eq!(
+            postgres.statements[0],
+            "UPDATE \"public\".\"files\" SET \"path\" = 'C:\\it''s', \"raw\" = '\\x0AFF'::bytea WHERE \"id\" = 3"
+        );
+
+        let sqlite = mutator
+            .build_pending_sql(SqlDialect::Sqlite, &page, "main", "files", &["id".into()])
+            .unwrap();
+        assert_eq!(
+            sqlite.statements[0],
+            "UPDATE \"main\".\"files\" SET \"path\" = 'C:\\it''s', \"raw\" = X'0AFF' WHERE \"id\" = 3"
+        );
     }
 }

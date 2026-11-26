@@ -514,6 +514,11 @@ fn build_opts(
             builder = builder.socket(Some(path.clone()));
             None
         }
+        ConnectionEndpoint::File { path } => {
+            return Err(DbError::message(format!(
+                "MySQL needs a host and port or a Unix socket, not the database file {path}"
+            )));
+        }
     };
 
     let ssl_opts = match profile.tls {

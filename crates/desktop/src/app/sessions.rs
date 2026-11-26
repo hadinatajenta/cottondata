@@ -200,7 +200,7 @@ impl CottonDataApp {
                 .and_then(|r| r.current_schema.clone())
                 .or_else(|| pending.and_then(|p| p.active_schema.clone()))
                 .or_else(|| prev.and_then(|p| p.active_schema.clone()))
-                .or_else(|| slot.profile.default_schema.clone());
+                .or_else(|| slot.profile.initial_schema());
             let autocommit = slot
                 .runtime
                 .as_ref()

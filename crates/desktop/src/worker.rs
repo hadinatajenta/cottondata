@@ -1,5 +1,5 @@
 use crate::drivers::{kill_running_query, open_session};
-use cottondata_core::{DatabaseEngine, ServerProfile, ServerRuntimeInfo, ServerSlotId, SERVER_SLOT_CAPACITY};
+use cottondata_core::{DatabaseEngine, ServerProfile, ServerRuntimeInfo, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_driver::{DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, ServerHealthMetrics};
 use cottondata_grid::{
     stream_import_batches, ColumnMapping, ExportFormat, ImportFormat, PageFilterSort, StreamExporter, TargetColumnSpec,
@@ -541,36 +541,7 @@ impl WorkerHub {
             .spawn(move || {
                 let mut relations = Vec::new();
                 if let Ok(mut session) = open_session(&profile, password.as_deref()) {
-                    let sql = match profile.engine {
-                        DatabaseEngine::MySql => {
-                            let escaped = schema.replace('\'', "''");
-                            format!(
-                                "SELECT constraint_name, table_name, column_name, \
-                                        referenced_table_name, referenced_column_name \
-                                 FROM information_schema.key_column_usage \
-                                 WHERE table_schema = '{escaped}' \
-                                   AND referenced_table_schema = '{escaped}' \
-                                   AND referenced_table_name IS NOT NULL \
-                                 ORDER BY table_name, constraint_name, ordinal_position"
-                            )
-                        }
-                        DatabaseEngine::SqlServer => {
-                            let db = format!("[{}]", schema.replace(']', "]]"));
-                            format!(
-                                "SELECT fk.name, ps.name + '.' + pt.name, pc.name, \
-                                        rs.name + '.' + rt.name, rc.name \
-                                 FROM {db}.sys.foreign_keys fk \
-                                 JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
-                                 JOIN {db}.sys.objects pt ON pt.object_id = fkc.parent_object_id \
-                                 JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
-                                 JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
-                                 JOIN {db}.sys.objects rt ON rt.object_id = fkc.referenced_object_id \
-                                 JOIN {db}.sys.schemas rs ON rs.schema_id = rt.schema_id \
-                                 JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
-                                 ORDER BY pt.name, fk.name"
-                            )
-                        }
-                    };
+                    let sql = foreign_key_relations_sql(profile.engine, &schema);
                     if let Ok(QueryOutcome::Rows(page)) = session.execute_sql(&sql, 4000) {
                         for row in 0..page.row_count {
                             if let (Some(c), Some(st), Some(sc), Some(rt), Some(rc)) = (
@@ -912,14 +883,7 @@ fn slot_worker_loop(
                 let dialect = sess.dialect();
                 let fq_table = dialect.qualified_table(&schema, &table);
                 let col_ident = dialect.quote_ident(&column_name);
-                let sql = match dialect {
-                    cottondata_core::SqlDialect::MySql => {
-                        format!("SELECT {col_ident} FROM {fq_table} WHERE {pk_where} LIMIT 1")
-                    }
-                    cottondata_core::SqlDialect::SqlServer => {
-                        format!("SELECT TOP (1) {col_ident} FROM {fq_table} WHERE {pk_where}")
-                    }
-                };
+                let sql = dialect.select_single_value(&col_ident, &fq_table, &pk_where);
                 match sess.execute_sql(&sql, 1) {
                     Ok(QueryOutcome::Rows(page)) => {
                         let value = page.cell_str(0, 0).map(ToOwned::to_owned);
@@ -1027,9 +991,8 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, None);
                     continue;
                 };
-                let sql = sess.dialect().kill_process(pid);
-                match sess.execute_sql(&sql, 1) {
-                    Ok(_) => {
+                match sess.kill_process(pid) {
+                    Ok(()) => {
                         if let Ok(entries) = sess.fetch_processlist() {
                             emit(&tx, &ctx, WorkerEvent::ProcesslistLoaded { slot, entries });
                         }
@@ -1047,6 +1010,81 @@ fn slot_worker_loop(
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
+        }
+    }
+}
+
+fn foreign_key_relations_sql(engine: DatabaseEngine, schema: &str) -> String {
+    match engine {
+        DatabaseEngine::MySql => {
+            let escaped = schema.replace('\'', "''");
+            format!(
+                "SELECT constraint_name, table_name, column_name, \
+                        referenced_table_name, referenced_column_name \
+                 FROM information_schema.key_column_usage \
+                 WHERE table_schema = '{escaped}' \
+                   AND referenced_table_schema = '{escaped}' \
+                   AND referenced_table_name IS NOT NULL \
+                 ORDER BY table_name, constraint_name, ordinal_position"
+            )
+        }
+        DatabaseEngine::SqlServer => {
+            let db = format!("[{}]", schema.replace(']', "]]"));
+            format!(
+                "SELECT fk.name, ps.name + '.' + pt.name, pc.name, \
+                        rs.name + '.' + rt.name, rc.name \
+                 FROM {db}.sys.foreign_keys fk \
+                 JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+                 JOIN {db}.sys.objects pt ON pt.object_id = fkc.parent_object_id \
+                 JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
+                 JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+                 JOIN {db}.sys.objects rt ON rt.object_id = fkc.referenced_object_id \
+                 JOIN {db}.sys.schemas rs ON rs.schema_id = rt.schema_id \
+                 JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+                 ORDER BY pt.name, fk.name"
+            )
+        }
+        DatabaseEngine::PostgreSql => {
+            let literal = SqlDialect::PostgreSql.string_literal(schema);
+            format!(
+                "SELECT con.conname::text, sc.relname::text, a.attname::text, fc.relname::text, fa.attname::text \
+                 FROM pg_constraint con \
+                 CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(local_attnum, foreign_attnum, ordinal) \
+                 JOIN pg_class sc ON sc.oid = con.conrelid \
+                 JOIN pg_namespace sn ON sn.oid = sc.relnamespace \
+                 JOIN pg_class fc ON fc.oid = con.confrelid \
+                 JOIN pg_namespace fn ON fn.oid = fc.relnamespace \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.local_attnum \
+                 JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.foreign_attnum \
+                 WHERE con.contype = 'f' AND sn.nspname = {literal} AND fn.nspname = {literal} \
+                 ORDER BY sc.relname, con.conname, k.ordinal"
+            )
+        }
+        DatabaseEngine::CockroachDb => {
+            let literal = SqlDialect::CockroachDb.string_literal(schema);
+            format!(
+                "SELECT rc.constraint_name, kcu.table_name, kcu.column_name, pk.table_name, pk.column_name \
+                 FROM information_schema.referential_constraints rc \
+                 JOIN information_schema.key_column_usage kcu \
+                   ON kcu.constraint_schema = rc.constraint_schema AND kcu.constraint_name = rc.constraint_name \
+                 JOIN information_schema.key_column_usage pk \
+                   ON pk.constraint_schema = rc.unique_constraint_schema \
+                  AND pk.constraint_name = rc.unique_constraint_name \
+                  AND pk.ordinal_position = kcu.position_in_unique_constraint \
+                 WHERE kcu.table_schema = {literal} AND pk.table_schema = {literal} \
+                 ORDER BY kcu.table_name, rc.constraint_name, kcu.ordinal_position"
+            )
+        }
+        DatabaseEngine::Sqlite => {
+            let schema_ref = SqlDialect::Sqlite.quote_ident(if schema.is_empty() { "main" } else { schema });
+            let schema_literal = SqlDialect::Sqlite.string_literal(if schema.is_empty() { "main" } else { schema });
+            format!(
+                "SELECT 'fk_' || m.name || '_' || f.id, m.name, f.\"from\", f.\"table\", f.\"to\" \
+                 FROM {schema_ref}.sqlite_master m \
+                 JOIN pragma_foreign_key_list(m.name, {schema_literal}) f \
+                 WHERE m.type = 'table' \
+                 ORDER BY m.name, f.id, f.seq"
+            )
         }
     }
 }

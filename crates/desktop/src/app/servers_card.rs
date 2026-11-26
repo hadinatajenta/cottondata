@@ -163,7 +163,7 @@ impl CottonDataApp {
         ui.add_space(6.0);
 
         if self.registry.count() == 0 {
-            caption(ui, palette, "No servers yet. Add MySQL or SQL Server connections.");
+            caption(ui, palette, "No servers yet. Add MySQL, PostgreSQL, CockroachDB, SQL Server, or SQLite connections.");
             ui.add_space(6.0);
             if secondary_button(ui, palette, icon::PLUS, "Add server", true).clicked() {
                 self.modal = Some(ServerModalState::new_empty());

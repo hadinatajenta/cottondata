@@ -28,30 +28,68 @@ pub struct SqlStatement<'a> {
 }
 
 pub const MYSQL_KEYWORDS: &[&str] = &[
-    "ACCESSIBLE", "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "AUTO_INCREMENT",
-    "BEFORE", "BEGIN", "BETWEEN", "BIGINT", "BINARY", "BIT", "BLOB", "BOOL", "BOOLEAN", "BY",
+    "ACCESSIBLE", "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "AUTO_INCREMENT", "BEFORE",
+    "BEGIN", "BETWEEN", "BIGINT", "BIGSERIAL", "BINARY", "BIT", "BLOB", "BOOL", "BOOLEAN", "BY",
     "CALL", "CASCADE", "CASE", "CHANGE", "CHAR", "CHARACTER", "CHECK", "COLLATE", "COLUMN",
-    "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME",
+    "COMMIT", "CONFLICT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME",
     "CURRENT_TIMESTAMP", "CURRENT_USER", "DATABASE", "DATABASES", "DATE", "DATETIME", "DECIMAL",
     "DECLARE", "DEFAULT", "DEFINER", "DELETE", "DESC", "DESCRIBE", "DISTINCT", "DIV", "DO",
     "DOUBLE", "DROP", "DUPLICATE", "ELSE", "ELSEIF", "END", "ENGINE", "ENUM", "EVENT", "EXISTS",
-    "EXPLAIN", "FALSE", "FLOAT", "FOR", "FORCE", "FOREIGN", "FORMAT", "FROM", "FULL", "FULLTEXT",
-    "FUNCTION", "GENERATED", "GRANT", "GROUP", "HAVING", "IF", "IGNORE", "IN", "INDEX", "INFILE",
-    "INNER", "INSERT", "INT", "INTEGER", "INTERVAL", "INTO", "IS", "JOIN", "JSON", "KEY", "KEYS",
-    "KILL", "LEFT", "LIKE", "LIMIT", "LOAD", "LOCK", "LONG", "LONGBLOB", "LONGTEXT", "LOW_PRIORITY",
-    "MATCH", "MEDIUMBLOB", "MEDIUMINT", "MEDIUMTEXT", "MOD", "MODIFY", "NATURAL", "NOT", "NULL",
-    "NUMERIC", "OFFSET", "ON", "OPTIMIZE", "OPTION", "OR", "ORDER", "OUTER", "OVER", "PARTITION",
-    "PRIMARY", "PRIVILEGES", "PROCEDURE", "PROCESSLIST", "PURGE", "QUERY", "RANGE", "READ", "REAL",
+    "EXPLAIN", "EXTENSION", "FALSE", "FLOAT", "FOR", "FORCE", "FOREIGN", "FORMAT", "FROM", "FULL",
+    "FULLTEXT", "FUNCTION", "GENERATED", "GRANT", "GROUP", "HAVING", "IF", "IGNORE", "ILIKE", "IN",
+    "INDEX", "INFILE", "INNER", "INSERT", "INT", "INTEGER", "INTERVAL", "INTO", "IS", "JOIN",
+    "JSON", "JSONB", "KEY", "KEYS", "KILL", "LATERAL", "LEFT", "LIKE", "LIMIT", "LOAD", "LOCK",
+    "LONG", "LONGBLOB", "LONGTEXT", "LOW_PRIORITY", "MATCH", "MATERIALIZED", "MEDIUMBLOB",
+    "MEDIUMINT", "MEDIUMTEXT", "MOD", "MODIFY", "NATURAL", "NOT", "NOTHING", "NULL", "NUMERIC",
+    "OFFSET", "ON", "OPTIMIZE", "OPTION", "OR", "ORDER", "OUTER", "OVER", "PARTITION", "PRIMARY",
+    "PRIVILEGES", "PROCEDURE", "PROCESSLIST", "PURGE", "QUERY", "RANGE", "READ", "REAL",
     "RECURSIVE", "REFERENCES", "REGEXP", "RELEASE", "RENAME", "REPEAT", "REPLACE", "REQUIRE",
-    "RESTRICT", "RETURN", "RETURNS", "REVOKE", "RIGHT", "RLIKE", "ROLLBACK", "ROW", "ROWS",
-    "SAVEPOINT", "SCHEMA", "SCHEMAS", "SELECT", "SEPARATOR", "SESSION", "SET", "SHOW", "SMALLINT",
-    "SPATIAL", "START", "STATUS", "STORED", "STRAIGHT_JOIN", "TABLE", "TABLES", "TEMPORARY",
-    "TERMINATED", "TEXT", "THEN", "TIME", "TIMESTAMP", "TINYBLOB", "TINYINT", "TINYTEXT", "TO",
-    "TRANSACTION", "TRIGGER", "TRIGGERS", "TRUE", "TRUNCATE", "UNION", "UNIQUE", "UNLOCK",
-    "UNSIGNED", "UPDATE", "USAGE", "USE", "USER", "USING", "UTC_DATE", "UTC_TIME", "UTC_TIMESTAMP",
-    "VALUES", "VARBINARY", "VARCHAR", "VARIABLES", "VIEW", "VIRTUAL", "WARNINGS", "WHEN", "WHERE",
-    "WHILE", "WINDOW", "WITH", "WRITE", "XOR", "YEAR", "ZEROFILL",
+    "RESTRICT", "RETURN", "RETURNING", "RETURNS", "REVOKE", "RIGHT", "RLIKE", "ROLLBACK", "ROW",
+    "ROWS", "SAVEPOINT", "SCHEMA", "SCHEMAS", "SELECT", "SEPARATOR", "SEQUENCE", "SERIAL",
+    "SESSION", "SET", "SHOW", "SMALLINT", "SPATIAL", "START", "STATUS", "STORED", "STRAIGHT_JOIN",
+    "TABLE", "TABLES", "TEMPORARY", "TERMINATED", "TEXT", "THEN", "TIME", "TIMESTAMP", "TINYBLOB",
+    "TINYINT", "TINYTEXT", "TO", "TRANSACTION", "TRIGGER", "TRIGGERS", "TRUE", "TRUNCATE", "UNION",
+    "UNIQUE", "UNLOCK", "UNSIGNED", "UPDATE", "USAGE", "USE", "USER", "USING", "UTC_DATE",
+    "UTC_TIME", "UTC_TIMESTAMP", "UUID", "VACUUM", "VALUES", "VARBINARY", "VARCHAR", "VARIABLES",
+    "VIEW", "VIRTUAL", "WARNINGS", "WHEN", "WHERE", "WHILE", "WINDOW", "WITH", "WRITE", "XOR",
+    "YEAR", "ZEROFILL",
 ];
+
+pub fn dollar_quote_tag_len(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let is_preceded_by_word = start > 0 && {
+        let previous = bytes[start - 1];
+        previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'$'
+    };
+    if is_preceded_by_word {
+        return None;
+    }
+    let mut cursor = start + 1;
+    if let Some(first) = bytes.get(cursor) {
+        if first.is_ascii_digit() {
+            return None;
+        }
+    }
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_') {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'$')).then_some(cursor + 1 - start)
+}
+
+fn dollar_quoted_end(input: &str, start: usize, tag_len: usize) -> usize {
+    let tag = &input[start..start + tag_len];
+    let body_start = start + tag_len;
+    input[body_start..]
+        .find(tag)
+        .map(|offset| body_start + offset + tag_len)
+        .unwrap_or(input.len())
+}
+
+fn starts_hash_comment(bytes: &[u8], position: usize) -> bool {
+    bytes.get(position) == Some(&b'#') && bytes.get(position + 1) != Some(&b'>')
+}
 
 pub fn is_keyword(word: &str) -> bool {
     MYSQL_KEYWORDS
@@ -77,7 +115,7 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
             continue;
         }
 
-        if b == b'#' {
+        if starts_hash_comment(bytes, i) {
             while i < len && bytes[i] != b'\n' {
                 i += 1;
             }
@@ -154,6 +192,12 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
                 i += 1;
             }
             out.push(Token { kind: TokenKind::SystemVar, text: &input[start..i], start, end: i });
+            continue;
+        }
+
+        if let Some(tag_len) = dollar_quote_tag_len(bytes, i) {
+            i = dollar_quoted_end(input, i, tag_len);
+            out.push(Token { kind: TokenKind::StringLiteral, text: &input[start..i], start, end: i });
             continue;
         }
 
@@ -303,10 +347,15 @@ pub fn split_statements(input: &str) -> Vec<SqlStatement<'_>> {
             continue;
         }
 
-        if b == b'#' {
+        if starts_hash_comment(bytes, i) {
             in_line_comment = true;
             at_line_start = false;
             i += 1;
+            continue;
+        }
+        if let Some(tag_len) = dollar_quote_tag_len(bytes, i) {
+            i = dollar_quoted_end(input, i, tag_len);
+            at_line_start = false;
             continue;
         }
         if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' && (i + 2 == len || bytes[i + 2].is_ascii_whitespace()) {
@@ -404,6 +453,47 @@ mod tests {
         assert!(stmts[1].sql.contains("CREATE PROCEDURE p_test()"));
         assert!(stmts[1].sql.contains("SELECT 2;"));
         assert_eq!(stmts[2].sql, "SELECT @@version");
+    }
+
+    #[test]
+    fn keeps_postgres_dollar_quoted_function_bodies_in_one_statement() {
+        let script = "CREATE FUNCTION add_one(x int) RETURNS int AS $$\nBEGIN\n  RETURN x + 1;\nEND;\n$$ LANGUAGE plpgsql;\nSELECT add_one(1);\nDO $body$ BEGIN PERFORM 1; END $body$;";
+        let stmts = split_statements(script);
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].sql.ends_with("LANGUAGE plpgsql"));
+        assert!(stmts[0].sql.contains("RETURN x + 1;"));
+        assert_eq!(stmts[1].sql, "SELECT add_one(1)");
+        assert!(stmts[2].sql.starts_with("DO $body$"));
+    }
+
+    #[test]
+    fn positional_parameters_and_identifiers_with_dollar_are_not_dollar_quotes() {
+        let stmts = split_statements("SELECT $1, price$usd FROM t WHERE id = $2; SELECT 2");
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(dollar_quote_tag_len(b"$1", 0), None);
+        assert_eq!(dollar_quote_tag_len(b"a$b$", 1), None);
+        assert_eq!(dollar_quote_tag_len(b"$tag$", 0), Some(5));
+    }
+
+    #[test]
+    fn json_path_operators_are_not_mysql_hash_comments() {
+        let stmts = split_statements("SELECT data #>> '{a,b}' FROM t; SELECT 2; # trailing comment ; still comment");
+        assert_eq!(stmts.len(), 3);
+        assert_eq!(stmts[0].sql, "SELECT data #>> '{a,b}' FROM t");
+        assert_eq!(stmts[1].sql, "SELECT 2");
+        let tokens = tokenize("SELECT data #> '{a}'");
+        assert!(tokens.iter().all(|token| token.kind != TokenKind::Comment));
+        let dollar_tokens = tokenize("SELECT $$it's; fine$$");
+        assert!(dollar_tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::StringLiteral && token.text == "$$it's; fine$$"));
+    }
+
+    #[test]
+    fn keyword_list_stays_sorted_for_binary_search() {
+        assert!(MYSQL_KEYWORDS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(is_keyword("returning"));
+        assert!(is_keyword("ilike"));
     }
 
     #[test]

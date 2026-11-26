@@ -397,7 +397,7 @@ impl CottonDataApp {
             .runtime
             .as_ref()
             .and_then(|r| r.current_schema.clone())
-            .or_else(|| profile.default_schema.clone());
+            .or_else(|| profile.initial_schema());
         let dialect = profile.engine.dialect();
 
         let sql = if let Some((schema, table)) = &tab.bound_table {

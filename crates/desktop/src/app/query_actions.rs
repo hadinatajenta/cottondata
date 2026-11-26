@@ -123,7 +123,7 @@ impl CottonDataApp {
             return;
         }
         let tab_id = tab.id;
-        let params = extract_params_for_statements(&statements);
+        let params = extract_params_for_statements(&statements, self.slot_dialect(Some(slot)));
         if !params.is_empty() {
             let fingerprint = query_param_fingerprint(&statements.join("\n"));
             let saved = self.param_history.get(&fingerprint);

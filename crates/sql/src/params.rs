@@ -62,7 +62,12 @@ fn is_param_ident(text: &str) -> bool {
     bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn extract_query_params_with_offset(sql: &str, next_positional: &mut usize) -> Vec<QueryParamSpec> {
+fn extract_query_params_with_offset(
+    sql: &str,
+    dialect: SqlDialect,
+    next_positional: &mut usize,
+) -> Vec<QueryParamSpec> {
+    let treats_question_mark_as_param = !dialect.is_postgres_family();
     let tokens = tokenize(sql);
     let bytes = sql.as_bytes();
     let mut specs: Vec<QueryParamSpec> = Vec::new();
@@ -100,7 +105,7 @@ fn extract_query_params_with_offset(sql: &str, next_positional: &mut usize) -> V
                     }
                 }
             }
-        } else if tok.kind == TokenKind::Operator && tok.text == "?" {
+        } else if treats_question_mark_as_param && tok.kind == TokenKind::Operator && tok.text == "?" {
             let idx = *next_positional;
             *next_positional += 1;
             specs.push(QueryParamSpec {
@@ -116,18 +121,18 @@ fn extract_query_params_with_offset(sql: &str, next_positional: &mut usize) -> V
     specs
 }
 
-pub fn extract_query_params(sql: &str) -> Vec<QueryParamSpec> {
+pub fn extract_query_params(sql: &str, dialect: SqlDialect) -> Vec<QueryParamSpec> {
     let mut next_positional = 1usize;
-    extract_query_params_with_offset(sql, &mut next_positional)
+    extract_query_params_with_offset(sql, dialect, &mut next_positional)
 }
 
-pub fn extract_params_for_statements(statements: &[String]) -> Vec<QueryParamSpec> {
+pub fn extract_params_for_statements(statements: &[String], dialect: SqlDialect) -> Vec<QueryParamSpec> {
     let mut specs: Vec<QueryParamSpec> = Vec::new();
     let mut named_indices: HashMap<String, usize> = HashMap::new();
     let mut next_positional = 1usize;
 
     for stmt in statements {
-        for spec in extract_query_params_with_offset(stmt, &mut next_positional) {
+        for spec in extract_query_params_with_offset(stmt, dialect, &mut next_positional) {
             if spec.is_positional {
                 specs.push(spec);
             } else if let Some(&idx) = named_indices.get(&spec.key) {
@@ -196,16 +201,10 @@ pub fn format_param_literal(binding: &ParamBinding, dialect: SqlDialect) -> Stri
                 return "NULL".into();
             }
             if trimmed.eq_ignore_ascii_case("true") {
-                return match dialect {
-                    SqlDialect::MySql => "TRUE".into(),
-                    SqlDialect::SqlServer => "1".into(),
-                };
+                return dialect.boolean_literal(true).into();
             }
             if trimmed.eq_ignore_ascii_case("false") {
-                return match dialect {
-                    SqlDialect::MySql => "FALSE".into(),
-                    SqlDialect::SqlServer => "0".into(),
-                };
+                return dialect.boolean_literal(false).into();
             }
             if is_strict_finite_number(trimmed) {
                 return trimmed.to_string();
@@ -261,7 +260,7 @@ pub fn bind_query_params(
     dialect: SqlDialect,
     bindings: &HashMap<String, ParamBinding>,
 ) -> String {
-    let specs = extract_query_params(sql);
+    let specs = extract_query_params(sql, dialect);
     apply_bindings(sql, &specs, dialect, bindings)
 }
 
@@ -274,7 +273,7 @@ pub fn bind_statements_params(
     statements
         .iter()
         .map(|stmt| {
-            let specs = extract_query_params_with_offset(stmt, &mut next_positional);
+            let specs = extract_query_params_with_offset(stmt, dialect, &mut next_positional);
             apply_bindings(stmt, &specs, dialect, bindings)
         })
         .collect()
@@ -318,7 +317,7 @@ mod tests {
     #[test]
     fn extracts_named_repeated_and_mixed_positional_params() {
         let sql = "SELECT * FROM orders WHERE user_id = :user_id AND status = :status AND owner_id = :user_id AND region = ? AND tier = ?";
-        let specs = extract_query_params(sql);
+        let specs = extract_query_params(sql, SqlDialect::MySql);
 
         assert_eq!(specs.len(), 4);
         assert_eq!(specs[0].key, ":user_id");
@@ -347,7 +346,7 @@ mod tests {
     #[test]
     fn named_params_are_case_sensitive() {
         let sql = "SELECT :id, :ID, :id";
-        let specs = extract_query_params(sql);
+        let specs = extract_query_params(sql, SqlDialect::MySql);
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].key, ":id");
         assert_eq!(specs[0].occurrences.len(), 2);
@@ -365,7 +364,7 @@ mod tests {
             /* block comment :ignored_block ? */
             WHERE x = ?
         "#;
-        let specs = extract_query_params(sql);
+        let specs = extract_query_params(sql, SqlDialect::MySql);
         let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, vec![":real_a", "?1"]);
     }
@@ -373,7 +372,7 @@ mod tests {
     #[test]
     fn ignores_mysql_assignment_and_double_colon_casts() {
         let sql = "SET @x := 1; SELECT val::text, @y:=:bound_val, num::int FROM t WHERE a = :other";
-        let specs = extract_query_params(sql);
+        let specs = extract_query_params(sql, SqlDialect::MySql);
         let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, vec![":bound_val", ":other"]);
     }
@@ -439,7 +438,7 @@ mod tests {
             "UPDATE b SET flag = ? WHERE tenant = :tenant AND y = ?".to_string(),
         ];
 
-        let specs = extract_params_for_statements(&statements);
+        let specs = extract_params_for_statements(&statements, SqlDialect::MySql);
         let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, vec![":tenant", "?1", "?2", "?3"]);
         assert_eq!(specs[0].occurrences.len(), 2);
@@ -471,5 +470,16 @@ mod tests {
 
         assert_eq!(query_param_fingerprint(a), query_param_fingerprint(b));
         assert_ne!(query_param_fingerprint(a), query_param_fingerprint(c));
+    }
+
+    #[test]
+    fn postgres_family_treats_question_mark_as_jsonb_operator_not_param() {
+        let sql = "SELECT * FROM t WHERE data ? 'key' AND data ?| array['a'] AND id = :id";
+        let postgres = extract_query_params(sql, SqlDialect::PostgreSql);
+        assert_eq!(postgres.len(), 1);
+        assert_eq!(postgres[0].key, ":id");
+        let mysql = extract_query_params(sql, SqlDialect::MySql);
+        assert!(mysql.iter().any(|spec| spec.is_positional));
+        assert!(extract_query_params("SELECT x::int, y::text FROM t", SqlDialect::CockroachDb).is_empty());
     }
 }

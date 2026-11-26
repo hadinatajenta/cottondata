@@ -5,7 +5,7 @@
 <h1 align="center">CottonData</h1>
 
 <p align="center">
-  <strong>Featherweight native Rust desktop client for MySQL and SQL Server.</strong><br/>
+  <strong>Featherweight native Rust desktop client for MySQL, PostgreSQL, CockroachDB, SQL Server, and SQLite.</strong><br/>
   Single ~13 MB app, no JVM, no embedded browser.
 </p>
 
@@ -183,9 +183,11 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 
 ## Features
 
-- **MySQL and SQL Server** in one native app — MySQL 5.7 / 8.x / 9.x / MariaDB and SQL Server 2012+ with SQL login.
+- **Five engines in one native app** — MySQL 5.7 / 8.x / 9.x / MariaDB, **PostgreSQL 9.6+** (including Supabase, Neon, TimescaleDB), **CockroachDB** (self-hosted and Cloud), SQL Server 2012+ with SQL login, and **SQLite** database files.
+- **PostgreSQL & CockroachDB done properly**: large `SELECT`s are read through a server-side cursor (PostgreSQL) or cancelled as soon as the page is full (CockroachDB), so `SELECT * FROM huge_table` never streams millions of rows. Inline editing works on single-table `SELECT` results (origin table, primary key, and nullability come from the row description). `$$` function bodies, `::` casts, JSONB `#>`/`?` operators, booleans shown as `true`/`false`, `bytea` shown as `\x…`, server-side Read-Only (`default_transaction_read_only`), manual-commit mode, savepoint-safe grid saves inside open transactions, `EXPLAIN (ANALYZE, BUFFERS)` that rolls back data changes, Stop via the native cancel protocol, `pg_get_*def`-accurate DDL, `pg_stat_activity` process list, unix sockets, `sslmode`/`sslrootcert` URLs, and actionable SQLSTATE errors with line/column positions.
+- **SQLite**: open or create `.db` / `.sqlite` files (or paste a path / `sqlite:` URL), attached databases as schemas, foreign keys enforced, true row limits without full scans, editable results, triggers listed, `EXPLAIN QUERY PLAN` tree, Stop via interrupt, and clear guidance when an `ALTER TABLE` change needs a table rebuild.
 - **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), and filters across servers with viewport culling for schemas containing hundreds of tables.
-- **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `mssql://`, `sqlserver://`), show/hide password, Unix sockets (MySQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
+- **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `postgres://`, `postgresql://`, `cockroachdb://`, `mssql://`, `sqlserver://`, `sqlite:` or a bare `.db` path), show/hide password, Unix sockets (MySQL and PostgreSQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
 - **Configurable server list**: 1 to 64 saved servers (default 10) from Settings. Saved servers cost almost no memory; only connected servers use RAM. `Cmd/Ctrl+1..0` switches the first ten.
 - **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), **Parameterized Queries** (`:user_id`, `?`) with a pre-run value dialog & per-query value memory, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware **autocomplete popup** at the caret (`↑/↓`, `Enter`/`Tab`, `Esc`, `Ctrl+Space`), and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
 - **Searchable History & Saved Queries / Snippets**: filter execution history by SQL, server, schema, or status without overwriting active consoles; save reusable SQL snippets (`Cmd/Ctrl+Shift+S`) with **Global** or **per-server** scope, folders, and pin-to-top.
@@ -228,7 +230,9 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 ### Known limitations
 
 - SQL Server: Windows/AD authentication, named instances (`host\INSTANCE`), and Azure AD sign-in are not supported yet. Stopping a running query ends the whole SQL Server session, which reconnects automatically.
-- Highlighting and completion follow MySQL rules on SQL Server connections.
+- Highlighting and completion follow MySQL rules on SQL Server and PostgreSQL-family connections (dollar-quoted bodies, `::` casts, and JSONB operators are understood by the statement splitter).
+- PostgreSQL and CockroachDB: one database per connection; switch databases by editing the connection (schemas inside the database are listed and switchable). CockroachDB `--cluster` routing options are not supported; use the cluster host name.
+- SQLite: changing a column's type, nullability, or default, and adding or dropping foreign keys, needs a manual table rebuild (the Table Structure Editor explains this instead of generating invalid SQL).
 - `cottondata-cli` connects to MySQL only.
 
 ---
@@ -248,6 +252,7 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 |---|---|---|
 | `COTTONDATA_PASSWORD` | `cottondata-cli` | Password for `test`, `schemas`, and `query` |
 | `COTTONDATA_MSSQL_HOST`, `COTTONDATA_MSSQL_PORT`, `COTTONDATA_MSSQL_USER`, `COTTONDATA_MSSQL_PASSWORD`, `COTTONDATA_MSSQL_DATABASE` | `cargo test -p cottondata-mssql --test live_server` | Optional read-only test against a real SQL Server; skipped when unset |
+| `COTTONDATA_PG_HOST`, `COTTONDATA_PG_PORT`, `COTTONDATA_PG_USER`, `COTTONDATA_PG_PASSWORD`, `COTTONDATA_PG_DATABASE`, `COTTONDATA_PG_ENGINE=cockroach` | `cargo test -p cottondata-postgres --test live_server` | Optional full round trip (creates and drops a temporary schema) against PostgreSQL or CockroachDB; skipped when unset |
 
 ---
 
@@ -289,6 +294,8 @@ crates/
 ├── driver/      # DatabaseSession trait, shared result and catalog types, SSH tunnel
 ├── mysql/       # MySQL driver (pure Rust, rustls) and MySQL introspection
 ├── mssql/       # SQL Server driver (tiberius, rustls) and sys-catalog introspection
+├── postgres/    # PostgreSQL and CockroachDB driver (tokio-postgres, rustls), cursor paging, pg_catalog introspection
+├── sqlite/      # SQLite driver (rusqlite, bundled SQLite) and PRAGMA introspection
 ├── introspect/  # Driver-agnostic schema catalog with string interning
 ├── sql/         # Lexer, statement splitter, safety linter, completion, formatter
 ├── grid/        # Columnar result pages, staged edits, CSV/TSV/JSON/SQL export

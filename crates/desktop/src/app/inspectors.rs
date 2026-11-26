@@ -159,9 +159,7 @@ impl CottonDataApp {
             );
             return;
         };
-        let has_full_scan = exp.raw_output.contains("\"access_type\": \"ALL\"")
-            || exp.raw_output.contains("Table scan")
-            || exp.raw_output.contains("PhysicalOp=\"Table Scan\"");
+        let has_full_scan = plan_has_full_scan(&exp.raw_output);
         ui.horizontal(|ui| {
             ui.label(icon_text(icon::CHART_BAR, p.accent, &exp.label, p.text_primary, 13.0));
             caption(ui, p, format!("{} ms", exp.elapsed_ms));
@@ -391,5 +389,32 @@ impl CottonDataApp {
             ui.ctx().copy_text(sql);
             self.notify_success("Copied SQL from history");
         }
+    }
+}
+
+fn plan_has_full_scan(raw_output: &str) -> bool {
+    raw_output.contains("\"access_type\": \"ALL\"")
+        || raw_output.contains("Table scan")
+        || raw_output.contains("PhysicalOp=\"Table Scan\"")
+        || raw_output.contains("Seq Scan on")
+        || raw_output.contains("FULL SCAN")
+        || raw_output.lines().any(|line| {
+            let step = line.trim_start().trim_start_matches("└─ ");
+            step.starts_with("SCAN ") && !step.starts_with("SCAN CONSTANT ROW")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_has_full_scan;
+
+    #[test]
+    fn detects_full_scans_across_engine_plan_formats() {
+        assert!(plan_has_full_scan("Seq Scan on orders  (cost=0.00..35.50 rows=2550 width=4)"));
+        assert!(plan_has_full_scan("  • scan\n    spans: FULL SCAN"));
+        assert!(plan_has_full_scan("SCAN orders\n  └─ SEARCH customers USING INTEGER PRIMARY KEY"));
+        assert!(!plan_has_full_scan("SEARCH orders USING INTEGER PRIMARY KEY (rowid=?)"));
+        assert!(!plan_has_full_scan("SCAN CONSTANT ROW"));
+        assert!(!plan_has_full_scan("Index Scan using orders_pkey on orders"));
     }
 }

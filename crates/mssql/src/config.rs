@@ -1,15 +1,7 @@
-use cottondata_core::{ConnectionEndpoint, ServerProfile, TlsMode};
-use cottondata_driver::{DbError, SshTunnel};
-use std::time::Duration;
+use cottondata_core::{ServerProfile, TlsMode};
 use tiberius::{AuthMethod, Config, EncryptionLevel};
 
 const APPLICATION_NAME: &str = "CottonData";
-
-pub(crate) struct ConnectTarget {
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) tunnel: Option<SshTunnel>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CertificateTrust {
@@ -47,27 +39,6 @@ pub(crate) fn tls_policy(mode: TlsMode, ca_cert_path: Option<&str>) -> TlsPolicy
             trust: custom_authority.unwrap_or(CertificateTrust::SystemRoots),
         },
     }
-}
-
-pub(crate) fn resolve_target(profile: &ServerProfile, timeout: Duration) -> Result<ConnectTarget, DbError> {
-    let ConnectionEndpoint::Tcp { host, port } = &profile.endpoint else {
-        return Err(DbError::message(
-            "SQL Server connections need a host and port, not a Unix socket",
-        ));
-    };
-    if !profile.ssh.enabled {
-        return Ok(ConnectTarget {
-            host: host.clone(),
-            port: *port,
-            tunnel: None,
-        });
-    }
-    let tunnel = SshTunnel::open(&profile.ssh, host, *port, timeout).map_err(DbError::message)?;
-    Ok(ConnectTarget {
-        host: "127.0.0.1".into(),
-        port: tunnel.local_port(),
-        tunnel: Some(tunnel),
-    })
 }
 
 pub(crate) fn build_config(profile: &ServerProfile, password: Option<&str>, host: &str, port: u16) -> Config {
@@ -124,18 +95,5 @@ mod tests {
             tls_policy(TlsMode::VerifyIdentity, Some("")).trust,
             CertificateTrust::SystemRoots
         );
-    }
-
-    #[test]
-    fn unix_socket_endpoints_are_rejected_with_a_clear_message() {
-        let mut profile = ServerProfile::new_local("mssql", "127.0.0.1", 1433, "sa");
-        profile.ssh.enabled = false;
-        profile.endpoint = ConnectionEndpoint::UnixSocket {
-            path: "/tmp/x.sock".into(),
-        };
-        let error = resolve_target(&profile, Duration::from_secs(1))
-            .err()
-            .expect("socket rejected");
-        assert!(error.to_string().contains("Unix socket"));
     }
 }

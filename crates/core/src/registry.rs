@@ -105,6 +105,7 @@ impl TlsMode {
 pub enum ConnectionEndpoint {
     Tcp { host: String, port: u16 },
     UnixSocket { path: String },
+    File { path: String },
 }
 
 impl Default for ConnectionEndpoint {
@@ -121,6 +122,7 @@ impl ConnectionEndpoint {
         match self {
             Self::Tcp { host, port } => format!("{host}:{port}"),
             Self::UnixSocket { path } => format!("unix://{path}"),
+            Self::File { path } => path.clone(),
         }
     }
 }
@@ -219,25 +221,50 @@ impl ServerProfile {
         }
     }
 
+    pub fn initial_schema(&self) -> Option<String> {
+        let treats_database_as_schema = matches!(self.engine, DatabaseEngine::MySql | DatabaseEngine::SqlServer);
+        self.default_schema
+            .as_deref()
+            .map(str::trim)
+            .filter(|schema| treats_database_as_schema && !schema.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn validate(&self) -> Result<(), RegistryError> {
         if self.name.trim().is_empty() {
             return Err(RegistryError::InvalidProfile("Server name cannot be empty".into()));
         }
-        if self.username.trim().is_empty() {
-            return Err(RegistryError::InvalidProfile("MySQL username cannot be empty".into()));
+        let engine_label = self.engine.label();
+        if self.engine.requires_credentials() && self.username.trim().is_empty() {
+            return Err(RegistryError::InvalidProfile(format!("{engine_label} username cannot be empty")));
         }
         match &self.endpoint {
+            ConnectionEndpoint::Tcp { .. } | ConnectionEndpoint::UnixSocket { .. } if self.engine.is_file_based() => {
+                return Err(RegistryError::InvalidProfile(format!(
+                    "{engine_label} connects to a database file, not a network address"
+                )));
+            }
+            ConnectionEndpoint::File { .. } if !self.engine.is_file_based() => {
+                return Err(RegistryError::InvalidProfile(format!(
+                    "{engine_label} needs a host and port, not a database file"
+                )));
+            }
             ConnectionEndpoint::Tcp { host, port } => {
                 if host.trim().is_empty() {
-                    return Err(RegistryError::InvalidProfile("MySQL host cannot be empty".into()));
+                    return Err(RegistryError::InvalidProfile(format!("{engine_label} host cannot be empty")));
                 }
                 if *port == 0 {
-                    return Err(RegistryError::InvalidProfile("MySQL port must be 1..=65535".into()));
+                    return Err(RegistryError::InvalidProfile(format!("{engine_label} port must be 1..=65535")));
                 }
             }
             ConnectionEndpoint::UnixSocket { path } => {
                 if path.trim().is_empty() {
                     return Err(RegistryError::InvalidProfile("Unix socket path cannot be empty".into()));
+                }
+            }
+            ConnectionEndpoint::File { path } => {
+                if path.trim().is_empty() {
+                    return Err(RegistryError::InvalidProfile("Database file path cannot be empty".into()));
                 }
             }
         }
@@ -325,7 +352,7 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SlotLimitReached { max } => {
-                write!(f, "Maximum of {max} MySQL server slots reached; remove a server before adding another")
+                write!(f, "Maximum of {max} server slots reached; remove a server before adding another")
             }
             Self::SlotEmpty(id) => write!(f, "Server slot {id} is empty"),
             Self::DuplicateName(name) => write!(f, "A server named '{name}' already exists"),
@@ -510,6 +537,44 @@ mod tests {
         let reg = ServerRegistry::from_profiles(profiles, 2).unwrap();
         assert_eq!(reg.count(), 5);
         assert_eq!(reg.max_servers(), 5);
+    }
+
+    #[test]
+    fn sqlite_profiles_need_a_file_path_but_no_username() {
+        let mut sqlite = ServerProfile::new_local("local file", "127.0.0.1", 0, "");
+        sqlite.engine = DatabaseEngine::Sqlite;
+        assert!(sqlite.validate().is_err());
+        sqlite.endpoint = ConnectionEndpoint::File {
+            path: "/tmp/app.db".into(),
+        };
+        assert_eq!(sqlite.validate(), Ok(()));
+        sqlite.endpoint = ConnectionEndpoint::File { path: "  ".into() };
+        assert!(sqlite.validate().is_err());
+    }
+
+    #[test]
+    fn network_engines_reject_file_endpoints_and_name_the_engine_in_errors() {
+        let mut postgres = ServerProfile::new_local("pg", "127.0.0.1", 5432, "");
+        postgres.engine = DatabaseEngine::PostgreSql;
+        let missing_user = postgres.validate().unwrap_err().to_string();
+        assert!(missing_user.contains("PostgreSQL username"));
+        postgres.username = "postgres".into();
+        postgres.endpoint = ConnectionEndpoint::File {
+            path: "/tmp/app.db".into(),
+        };
+        assert!(postgres.validate().is_err());
+    }
+
+    #[test]
+    fn initial_schema_only_reuses_the_database_field_where_database_means_schema() {
+        let mut profile = ServerProfile::new_local("db", "127.0.0.1", 3306, "root");
+        profile.default_schema = Some(" shop ".into());
+        assert_eq!(profile.initial_schema().as_deref(), Some("shop"));
+        profile.engine = DatabaseEngine::PostgreSql;
+        assert_eq!(profile.initial_schema(), None);
+        profile.engine = DatabaseEngine::SqlServer;
+        profile.default_schema = Some("  ".into());
+        assert_eq!(profile.initial_schema(), None);
     }
 
     #[test]

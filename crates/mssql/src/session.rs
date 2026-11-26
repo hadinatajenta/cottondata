@@ -1,4 +1,3 @@
-use crate::config::resolve_target;
 use crate::connection::{load_runtime_info, open_client};
 use crate::errors::mssql_error;
 use crate::introspection;
@@ -7,8 +6,8 @@ use crate::results::{read_first_result_set, stream_first_result_set};
 use crate::rows::{int, optional_text, MssqlClient};
 use cottondata_core::{ServerProfile, ServerRuntimeInfo, SqlDialect};
 use cottondata_driver::{
-    DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, SchemaObjects, SchemaSummary,
-    ServerHealthMetrics, SshTunnel, TableDetail,
+    resolve_tcp_target, DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, SchemaObjects,
+    SchemaSummary, ServerHealthMetrics, SshTunnel, TableDetail,
 };
 use cottondata_grid::ColumnMeta;
 use cottondata_sql::{analyze_statement, WriteClass};
@@ -30,7 +29,7 @@ impl MssqlSession {
             .enable_all()
             .build()
             .map_err(|err| DbError::message(format!("Could not start the SQL Server runtime: {err}")))?;
-        let target = resolve_target(profile, timeout)?;
+        let target = resolve_tcp_target(profile, timeout)?;
         let mut client = executor.block_on(open_client(profile, password, &target.host, target.port, timeout))?;
         let runtime = executor.block_on(load_runtime_info(&mut client))?;
         Ok(Self {

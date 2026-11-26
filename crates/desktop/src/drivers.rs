@@ -2,6 +2,8 @@ use cottondata_core::{DatabaseEngine, ServerProfile};
 use cottondata_driver::{DatabaseSession, DbError};
 use cottondata_mssql::MssqlSession;
 use cottondata_mysql::MySqlSession;
+use cottondata_postgres::PostgresSession;
+use cottondata_sqlite::SqliteSession;
 
 pub fn install_tls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
@@ -13,6 +15,10 @@ pub fn open_session(profile: &ServerProfile, password: Option<&str>) -> Result<B
     match profile.engine {
         DatabaseEngine::MySql => Ok(Box::new(MySqlSession::connect(profile, password)?)),
         DatabaseEngine::SqlServer => Ok(Box::new(MssqlSession::connect(profile, password)?)),
+        DatabaseEngine::PostgreSql | DatabaseEngine::CockroachDb => {
+            Ok(Box::new(PostgresSession::connect(profile, password)?))
+        }
+        DatabaseEngine::Sqlite => Ok(Box::new(SqliteSession::connect(profile, password)?)),
     }
 }
 
@@ -20,6 +26,10 @@ pub fn kill_running_query(profile: &ServerProfile, password: Option<&str>, conne
     match profile.engine {
         DatabaseEngine::MySql => MySqlSession::kill_query_via_aux(profile, password, connection_id),
         DatabaseEngine::SqlServer => MssqlSession::kill_session_via_aux(profile, password, connection_id),
+        DatabaseEngine::PostgreSql | DatabaseEngine::CockroachDb => {
+            PostgresSession::kill_query_via_aux(profile, password, connection_id)
+        }
+        DatabaseEngine::Sqlite => SqliteSession::interrupt_running_query(profile, connection_id),
     }
 }
 

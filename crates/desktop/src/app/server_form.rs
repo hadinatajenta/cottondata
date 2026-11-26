@@ -25,6 +25,7 @@ pub(super) struct ServerModalState {
     pub(super) host: String,
     pub(super) port: String,
     pub(super) socket_path: String,
+    pub(super) database_file: String,
     pub(super) username: String,
     pub(super) password: String,
     pub(super) save_in_keychain: bool,
@@ -56,7 +57,8 @@ impl ServerModalState {
             use_unix_socket: false,
             host: "127.0.0.1".into(),
             port: "3306".into(),
-            socket_path: "/tmp/mysql.sock".into(),
+            socket_path: default_socket_path(DatabaseEngine::MySql).into(),
+            database_file: String::new(),
             username: "root".into(),
             password: String::new(),
             save_in_keychain: cfg!(target_os = "macos"),
@@ -89,9 +91,12 @@ impl ServerModalState {
     }
 
     fn from_profile(editing_slot: Option<ServerSlotId>, p: &ServerProfile, pw: Option<String>, name: String) -> Self {
-        let (use_unix_socket, host, port, socket_path) = match &p.endpoint {
-            ConnectionEndpoint::Tcp { host, port } => (false, host.clone(), port.to_string(), "/tmp/mysql.sock".into()),
-            ConnectionEndpoint::UnixSocket { path } => (true, "127.0.0.1".into(), "3306".into(), path.clone()),
+        let default_port = p.engine.default_port().to_string();
+        let default_socket = default_socket_path(p.engine).to_string();
+        let (use_unix_socket, host, port, socket_path, database_file) = match &p.endpoint {
+            ConnectionEndpoint::Tcp { host, port } => (false, host.clone(), port.to_string(), default_socket, String::new()),
+            ConnectionEndpoint::UnixSocket { path } => (true, "127.0.0.1".into(), default_port, path.clone(), String::new()),
+            ConnectionEndpoint::File { path } => (false, "127.0.0.1".into(), default_port, default_socket, path.clone()),
         };
         Self {
             editing_slot,
@@ -101,6 +106,7 @@ impl ServerModalState {
             host,
             port,
             socket_path,
+            database_file,
             username: p.username.clone(),
             password: pw.unwrap_or_default(),
             save_in_keychain: cfg!(target_os = "macos"),
@@ -132,10 +138,34 @@ impl ServerModalState {
         if !engine.supports_unix_socket() {
             self.use_unix_socket = false;
         }
-        if self.username.trim() == default_username(self.engine) {
-            self.username = default_username(engine).into();
+        if self.socket_path.trim() == default_socket_path(self.engine) || self.socket_path.trim().is_empty() {
+            self.socket_path = default_socket_path(engine).into();
+        }
+        if self.username.trim() == self.engine.default_username() {
+            self.username = engine.default_username().into();
         }
         self.engine = engine;
+    }
+
+    fn apply_sqlite_location(&mut self, location: &str) -> Result<(), String> {
+        let path = percent_decode(location.split('?').next().unwrap_or(location)).trim().to_string();
+        if path.is_empty() {
+            return Err("SQLite URI is missing the database file path".to_string());
+        }
+        self.engine = DatabaseEngine::Sqlite;
+        self.use_unix_socket = false;
+        self.ssh_enabled = false;
+        self.database_file = path;
+        if self.name.trim().is_empty() {
+            let file_name = std::path::Path::new(&self.database_file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.database_file.clone());
+            self.name = format!("{file_name} (SQLite)");
+        }
+        self.test_state = ConnectionTestState::Idle;
+        self.error_msg = None;
+        Ok(())
     }
 
     pub(super) fn apply_connection_uri(&mut self, raw: &str) -> Result<(), String> {
@@ -144,16 +174,22 @@ impl ServerModalState {
             return Err("Connection URI cannot be empty".to_string());
         }
 
-        let (scheme, rest) = trimmed
-            .split_once("://")
-            .ok_or_else(|| "Connection URI must include a scheme (e.g. mysql:// or mssql://)".to_string())?;
+        if let Some(location) = sqlite_location(trimmed) {
+            return self.apply_sqlite_location(location);
+        }
 
-        let engine = match scheme.to_ascii_lowercase().as_str() {
+        let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
+            "Connection URI must include a scheme (e.g. mysql://, postgres://, mssql:// or sqlite:)".to_string()
+        })?;
+
+        let mut engine = match scheme.to_ascii_lowercase().as_str() {
             "mysql" | "mariadb" => DatabaseEngine::MySql,
             "mssql" | "sqlserver" => DatabaseEngine::SqlServer,
+            "postgres" | "postgresql" | "pg" => DatabaseEngine::PostgreSql,
+            "cockroachdb" | "cockroach" | "crdb" => DatabaseEngine::CockroachDb,
             _ => {
                 return Err(format!(
-                    "Unsupported URI scheme '{scheme}'. Expected mysql://, mariadb://, mssql://, or sqlserver://"
+                    "Unsupported URI scheme '{scheme}'. Expected mysql://, mariadb://, postgres://, postgresql://, cockroachdb://, mssql://, sqlserver:// or sqlite:"
                 ));
             }
         };
@@ -208,6 +244,11 @@ impl ServerModalState {
         if host.is_empty() {
             return Err("Connection URI is missing a host".to_string());
         }
+        let is_cockroach_endpoint =
+            port_str == Some("26257") || host.to_ascii_lowercase().ends_with(".cockroachlabs.cloud");
+        if engine == DatabaseEngine::PostgreSql && is_cockroach_endpoint {
+            engine = DatabaseEngine::CockroachDb;
+        }
 
         let port = match port_str {
             Some(p) if !p.is_empty() => {
@@ -230,6 +271,7 @@ impl ServerModalState {
             .filter(|s| !s.trim().is_empty());
 
         let mut parsed_tls: Option<TlsMode> = None;
+        let mut parsed_ca_path: Option<String> = None;
 
         if let Some(query) = raw_query {
             for pair in query.split('&') {
@@ -247,9 +289,14 @@ impl ServerModalState {
                             parsed_tls = Some(mode);
                         }
                     }
-                    "database" => {
+                    "database" | "dbname" => {
                         if parsed_schema.is_none() && !val.is_empty() {
                             parsed_schema = Some(val);
+                        }
+                    }
+                    "sslrootcert" | "ssl-ca" | "sslca" => {
+                        if !val.is_empty() {
+                            parsed_ca_path = Some(val);
                         }
                     }
                     _ => {}
@@ -258,6 +305,9 @@ impl ServerModalState {
         }
 
         let previous_engine = self.engine;
+        if self.socket_path.trim() == default_socket_path(previous_engine) {
+            self.socket_path = default_socket_path(engine).into();
+        }
         self.engine = engine;
         self.use_unix_socket = false;
         self.host = host;
@@ -267,8 +317,8 @@ impl ServerModalState {
             if !user.is_empty() {
                 self.username = user;
             }
-        } else if self.username.trim().is_empty() || self.username.trim() == default_username(previous_engine) {
-            self.username = default_username(engine).into();
+        } else if self.username.trim().is_empty() || self.username.trim() == previous_engine.default_username() {
+            self.username = engine.default_username().into();
         }
 
         if let Some(pass) = parsed_pass {
@@ -281,6 +331,10 @@ impl ServerModalState {
 
         if let Some(tls) = parsed_tls {
             self.tls = tls;
+        }
+
+        if let Some(ca_path) = parsed_ca_path {
+            self.ca_cert_path = ca_path;
         }
 
         if self.name.trim().is_empty() {
@@ -298,7 +352,11 @@ impl ServerModalState {
     }
 
     pub(super) fn build_profile(&self, existing_id: Option<String>) -> Result<ServerProfile, String> {
-        let endpoint = if self.use_unix_socket && self.engine.supports_unix_socket() {
+        let endpoint = if self.engine.is_file_based() {
+            ConnectionEndpoint::File {
+                path: self.database_file.trim().to_string(),
+            }
+        } else if self.use_unix_socket && self.engine.supports_unix_socket() {
             ConnectionEndpoint::UnixSocket {
                 path: self.socket_path.trim().to_string(),
             }
@@ -359,7 +417,7 @@ impl ServerModalState {
                 }
             },
             ssh: SshTunnelConfig {
-                enabled: self.ssh_enabled,
+                enabled: self.ssh_enabled && !self.engine.is_file_based(),
                 host: self.ssh_host.trim().to_string(),
                 port: ssh_port,
                 username: self.ssh_user.trim().to_string(),
@@ -385,20 +443,34 @@ impl ServerModalState {
     }
 }
 
-fn default_username(engine: DatabaseEngine) -> &'static str {
+fn default_socket_path(engine: DatabaseEngine) -> &'static str {
     match engine {
-        DatabaseEngine::MySql => "root",
-        DatabaseEngine::SqlServer => "sa",
+        DatabaseEngine::PostgreSql => "/tmp/.s.PGSQL.5432",
+        _ => "/tmp/mysql.sock",
     }
+}
+
+fn sqlite_location(uri: &str) -> Option<&str> {
+    let lower = uri.to_ascii_lowercase();
+    for prefix in ["sqlite3://", "sqlite://", "sqlite3:", "sqlite:", "file://", "file:"] {
+        if lower.starts_with(prefix) {
+            return Some(&uri[prefix.len()..]);
+        }
+    }
+    let is_bare_database_file = !uri.contains("://")
+        && [".db", ".sqlite", ".sqlite3", ".db3"]
+            .iter()
+            .any(|extension| lower.ends_with(extension));
+    is_bare_database_file.then_some(uri)
 }
 
 fn parse_tls_mode(value: &str) -> Option<TlsMode> {
     match value.to_ascii_lowercase().as_str() {
-        "disabled" | "false" => Some(TlsMode::Disabled),
-        "preferred" => Some(TlsMode::Preferred),
-        "required" | "true" => Some(TlsMode::Required),
+        "disabled" | "disable" | "false" => Some(TlsMode::Disabled),
+        "preferred" | "prefer" | "allow" => Some(TlsMode::Preferred),
+        "required" | "require" | "true" => Some(TlsMode::Required),
         "verify_ca" | "verify-ca" => Some(TlsMode::VerifyCa),
-        "verify_identity" | "verify-identity" => Some(TlsMode::VerifyIdentity),
+        "verify_identity" | "verify-identity" | "verify-full" | "verify_full" => Some(TlsMode::VerifyIdentity),
         _ => None,
     }
 }
@@ -525,7 +597,8 @@ mod tests {
         let mut form = ServerModalState::new_empty();
         assert!(form.apply_connection_uri("").is_err());
         assert!(form.apply_connection_uri("localhost:3306").is_err());
-        assert!(form.apply_connection_uri("postgres://user:pass@localhost:5432/db").is_err());
+        assert!(form.apply_connection_uri("redis://user:pass@localhost:6379/0").is_err());
+        assert!(form.apply_connection_uri("sqlite:").is_err());
         assert!(form.apply_connection_uri("mysql:///orders").is_err());
         assert!(form.apply_connection_uri("mysql://user:pass@/orders").is_err());
         assert!(form.apply_connection_uri("mysql://user:pass@[]:3306/orders").is_err());
@@ -580,5 +653,88 @@ mod tests {
         assert!(!dup.show_uri_bar);
         assert!(dup.uri_input.is_empty());
         assert_eq!(dup.test_state, ConnectionTestState::Idle);
+    }
+
+    #[test]
+    fn parses_postgres_uri_with_libpq_ssl_options() {
+        let mut form = ServerModalState::new_empty();
+        form.apply_connection_uri(
+            "postgresql://app:s%3Acret@db.internal/billing?sslmode=verify-full&sslrootcert=%2Fetc%2Fca.pem",
+        )
+        .expect("valid postgres URI");
+        assert_eq!(form.engine, DatabaseEngine::PostgreSql);
+        assert_eq!(form.port, "5432");
+        assert_eq!(form.username, "app");
+        assert_eq!(form.password, "s:cret");
+        assert_eq!(form.default_schema, "billing");
+        assert_eq!(form.tls, TlsMode::VerifyIdentity);
+        assert_eq!(form.ca_cert_path, "/etc/ca.pem");
+        assert_eq!(form.name, "billing (PostgreSQL)");
+
+        let mut prefer = ServerModalState::new_empty();
+        prefer
+            .apply_connection_uri("postgres://localhost?sslmode=disable")
+            .expect("bare postgres URI");
+        assert_eq!(prefer.tls, TlsMode::Disabled);
+        assert_eq!(prefer.username, "postgres");
+    }
+
+    #[test]
+    fn detects_cockroach_from_scheme_port_or_cloud_host() {
+        let mut by_scheme = ServerModalState::new_empty();
+        by_scheme
+            .apply_connection_uri("cockroachdb://root@localhost/defaultdb")
+            .expect("cockroach scheme");
+        assert_eq!(by_scheme.engine, DatabaseEngine::CockroachDb);
+        assert_eq!(by_scheme.port, "26257");
+
+        let mut by_port = ServerModalState::new_empty();
+        by_port
+            .apply_connection_uri("postgresql://root@127.0.0.1:26257/bank")
+            .expect("cockroach port");
+        assert_eq!(by_port.engine, DatabaseEngine::CockroachDb);
+
+        let mut by_host = ServerModalState::new_empty();
+        by_host
+            .apply_connection_uri("postgresql://u:p@free-tier.gcp-us-central1.cockroachlabs.cloud/defaultdb?sslmode=verify-full")
+            .expect("cockroach cloud");
+        assert_eq!(by_host.engine, DatabaseEngine::CockroachDb);
+        assert_eq!(by_host.port, "26257");
+    }
+
+    #[test]
+    fn sqlite_uris_and_bare_database_paths_build_file_profiles() {
+        let mut form = ServerModalState::new_empty();
+        form.apply_connection_uri("sqlite:///Users/dev/app%20data/shop.sqlite3")
+            .expect("sqlite uri");
+        assert_eq!(form.engine, DatabaseEngine::Sqlite);
+        assert_eq!(form.database_file, "/Users/dev/app data/shop.sqlite3");
+        assert_eq!(form.name, "shop.sqlite3 (SQLite)");
+        let profile = form.build_profile(None).expect("sqlite profile");
+        assert_eq!(
+            profile.endpoint,
+            ConnectionEndpoint::File {
+                path: "/Users/dev/app data/shop.sqlite3".into()
+            }
+        );
+        assert!(!profile.ssh.enabled);
+
+        let mut bare = ServerModalState::new_empty();
+        bare.apply_connection_uri("/tmp/cache.db").expect("bare path");
+        assert_eq!(bare.engine, DatabaseEngine::Sqlite);
+        assert_eq!(bare.database_file, "/tmp/cache.db");
+    }
+
+    #[test]
+    fn switching_engine_updates_default_port_username_and_socket() {
+        let mut form = ServerModalState::new_empty();
+        form.switch_engine(DatabaseEngine::PostgreSql);
+        assert_eq!(form.port, "5432");
+        assert_eq!(form.username, "postgres");
+        assert_eq!(form.socket_path, "/tmp/.s.PGSQL.5432");
+        form.switch_engine(DatabaseEngine::CockroachDb);
+        assert_eq!(form.port, "26257");
+        assert_eq!(form.username, "root");
+        assert!(!form.use_unix_socket);
     }
 }

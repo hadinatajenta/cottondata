@@ -2,6 +2,20 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **PostgreSQL driver (`crates/postgres`)** for PostgreSQL 9.6+ and compatible services (Supabase, Neon, TimescaleDB): cursor-based paging so large `SELECT`s only fetch one page, inline editing of single-table `SELECT` results using the row description's origin table and key metadata, booleans as `true`/`false`, `bytea` as `\x…`, arrays and JSONB as text, `pg_get_*def`-accurate DDL with indexes, constraints and comments, views and materialized views, routines, inbound and outbound foreign keys, `pg_stat_activity` process list with cancel, health metrics, `EXPLAIN` and `EXPLAIN (ANALYZE, BUFFERS)` that rolls back data changes, server-side Read-Only via `default_transaction_read_only`, emulated manual-commit mode, savepoint-safe grid saves inside open transactions, Stop through the native cancel protocol, SQLSTATE-aware errors with hints and line/column positions, all five TLS modes (with correct SNI through SSH tunnels), and Unix sockets.
+- **CockroachDB support** on the same driver with automatic detection: `SHOW CREATE TABLE` DDL, `SHOW INDEXES`, `SHOW CLUSTER QUERIES` process list with `CANCEL QUERY`, cluster health, and page-capped reads that cancel the remainder of a large result instead of streaming it.
+- **SQLite driver (`crates/sqlite`)**: open or create database files, attached databases as schemas, foreign keys enforced, page limits without full scans, editable results via column metadata, triggers, indexes and foreign keys (both directions), `EXPLAIN QUERY PLAN` tree plus a timed run that is rolled back, health from PRAGMAs, and Stop via interrupt.
+- Connection dialog: engine cards for all five engines, `postgres://` / `postgresql://` / `cockroachdb://` / `sqlite:` URLs (libpq `sslmode` and `sslrootcert` included, CockroachDB detected from port 26257 or `*.cockroachlabs.cloud`), and a database-file picker with Browse and New for SQLite.
+
+### Changed
+- SQL statement splitter understands PostgreSQL dollar-quoted bodies and JSONB `#>`/`#>>` operators; `?` is no longer treated as a query parameter on PostgreSQL-family connections because it is a JSONB operator there.
+- Table Structure Editor and Schema Compare generate PostgreSQL, CockroachDB and SQLite DDL, and explain clearly when SQLite needs a table rebuild.
+- Full-table-scan warnings in the Explain panel recognise PostgreSQL, CockroachDB and SQLite plans.
+- Host/port/SSH-tunnel resolution is shared by all network drivers (`cottondata-driver::resolve_tcp_target`), and killing a process is a `DatabaseSession` method so each engine can cancel in its own way.
+
 ## [0.9.0] — 2026-11-26
 
 ### Changed

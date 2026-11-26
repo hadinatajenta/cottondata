@@ -5,6 +5,8 @@ members = [
     "crates/driver",
     "crates/mysql",
     "crates/mssql",
+    "crates/postgres",
+    "crates/sqlite",
     "crates/introspect",
     "crates/sql",
     "crates/grid",
@@ -26,6 +28,8 @@ cottondata-core = { path = "crates/core" }
 cottondata-driver = { path = "crates/driver" }
 cottondata-mysql = { path = "crates/mysql" }
 cottondata-mssql = { path = "crates/mssql" }
+cottondata-postgres = { path = "crates/postgres" }
+cottondata-sqlite = { path = "crates/sqlite" }
 cottondata-introspect = { path = "crates/introspect" }
 cottondata-sql = { path = "crates/sql" }
 cottondata-grid = { path = "crates/grid" }
@@ -34,6 +38,11 @@ cottondata-storage = { path = "crates/storage" }
 eframe = { version = "=0.31.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 rfd = { version = "=0.15.3", default-features = false }
 egui-phosphor = { version = "=0.9.0", default-features = false, features = ["regular"] }
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8.1"
+rustls-pemfile = "2.2.0"
+rusqlite = { version = "0.37.0", features = ["bundled", "column_metadata", "column_decltype"] }
 tiberius = { version = "=0.13.0", default-features = false, features = ["tds73", "rustls", "chrono"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 tokio-util = { version = "0.7", default-features = false, features = ["compat"] }

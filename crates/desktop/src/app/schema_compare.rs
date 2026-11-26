@@ -61,7 +61,7 @@ impl CottonDataApp {
                     .get(slot)
                     .and_then(|s| s.runtime.as_ref())
                     .and_then(|r| r.current_schema.clone())
-                    .or_else(|| self.registry.get(slot).and_then(|s| s.profile.default_schema.clone()))
+                    .or_else(|| self.registry.get(slot).and_then(|s| s.profile.initial_schema()))
             })
             .unwrap_or_else(|| source_schema.clone());
         self.schema_compare = Some(SchemaCompareState::new(
