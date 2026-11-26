@@ -382,3 +382,50 @@ fn build_mysql_layout(
 
     ui.fonts(|fonts| fonts.layout_job(job))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_kit::icon;
+
+    fn fonts_with_only(font_name: &str, font_bytes: &'static [u8]) -> egui::epaint::text::Fonts {
+        let mut definitions = egui::FontDefinitions::empty();
+        definitions.font_data.insert(
+            font_name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(font_bytes)),
+        );
+        definitions
+            .families
+            .insert(FontFamily::Proportional, vec![font_name.to_owned()]);
+        egui::epaint::text::Fonts::new(1.0, 2048, definitions)
+    }
+
+    #[test]
+    fn text_fonts_never_shadow_phosphor_icon_codepoints() {
+        let icon_glyphs = [
+            icon::DATABASE,
+            icon::GEAR_SIX,
+            icon::FILE,
+            icon::FILE_PLUS,
+            icon::GLOBE,
+            icon::CARET_DOWN,
+            icon::FLOPPY_DISK,
+            icon::KEY,
+            icon::INFO,
+            icon::FUNNEL,
+        ];
+        let font_id = FontId::new(13.0, FontFamily::Proportional);
+        for (font_name, font_bytes) in [(UI_FONT_NAME, UI_FONT_BYTES), (CODE_FONT_NAME, CODE_FONT_BYTES)] {
+            let fonts = fonts_with_only(font_name, font_bytes);
+            for glyph in icon_glyphs {
+                let codepoint = glyph.chars().next().expect("icon codepoint");
+                assert!(
+                    !fonts.has_glyph(&font_id, codepoint),
+                    "{font_name} defines U+{:04X}, which hides the Phosphor icon",
+                    codepoint as u32
+                );
+            }
+            assert!(fonts.has_glyphs(&font_id, "Server 4/10 settings"));
+        }
+    }
+}
