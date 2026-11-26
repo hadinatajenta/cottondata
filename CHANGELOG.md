@@ -2,7 +2,7 @@
 
 All notable changes to CottonData are documented in this file.
 
-## [Unreleased]
+## [0.10.0] — 2026-11-26
 
 ### Added
 - **PostgreSQL driver (`crates/postgres`)** for PostgreSQL 9.6+ and compatible services (Supabase, Neon, TimescaleDB): cursor-based paging so large `SELECT`s only fetch one page, inline editing of single-table `SELECT` results using the row description's origin table and key metadata, booleans as `true`/`false`, `bytea` as `\x…`, arrays and JSONB as text, `pg_get_*def`-accurate DDL with indexes, constraints and comments, views and materialized views, routines, inbound and outbound foreign keys, `pg_stat_activity` process list with cancel, health metrics, `EXPLAIN` and `EXPLAIN (ANALYZE, BUFFERS)` that rolls back data changes, server-side Read-Only via `default_transaction_read_only`, emulated manual-commit mode, savepoint-safe grid saves inside open transactions, Stop through the native cancel protocol, SQLSTATE-aware errors with hints and line/column positions, all five TLS modes (with correct SNI through SSH tunnels), and Unix sockets.
@@ -15,6 +15,10 @@ All notable changes to CottonData are documented in this file.
 - Table Structure Editor and Schema Compare generate PostgreSQL, CockroachDB and SQLite DDL, and explain clearly when SQLite needs a table rebuild.
 - Full-table-scan warnings in the Explain panel recognise PostgreSQL, CockroachDB and SQLite plans.
 - Host/port/SSH-tunnel resolution is shared by all network drivers (`cottondata-driver::resolve_tcp_target`), and killing a process is a `DatabaseSession` method so each engine can cancel in its own way.
+
+### Fixed
+- **Phosphor UI icons**: subset `Inter-Regular.ttf` to strip Private Use Area glyphs so Inter no longer shadows Phosphor icons across the toolbar, explorer, and modals.
+- **HD app icon**: preserve macOS `.app` bundle's native multi-resolution `AppIcon.icns` (up to 1024×1024) at runtime instead of overwriting it with a 64×64 bitmap, and embed high-resolution PNG icons (`512px` on macOS, `256px` on Windows/Linux) for non-bundle launches and HiDPI window/taskbar icons.
 
 ## [0.9.0] — 2026-11-26
 

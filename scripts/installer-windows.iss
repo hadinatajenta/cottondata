@@ -1,5 +1,5 @@
 #define MyAppName "CottonData"
-#define MyAppVersion "0.9.0"
+#define MyAppVersion "0.10.0"
 #define MyAppPublisher "Hadinata"
 #define MyAppURL "https://github.com/hadinatajenta/cottondata"
 #define MyAppExeName "CottonData.exe"
