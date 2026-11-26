@@ -138,8 +138,21 @@ impl CottonDataApp {
     }
 }
 
+pub(super) fn contains_ascii_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    let needle = needle_lower.as_bytes();
+    let hay = haystack.as_bytes();
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len())
+        .any(|w| w.iter().zip(needle).all(|(&a, &b)| a.to_ascii_lowercase() == b))
+}
+
 fn contains_filter(candidate: &str, filter: &str) -> bool {
-    filter.is_empty() || candidate.to_ascii_lowercase().contains(filter)
+    contains_ascii_ignore_case(candidate, filter)
 }
 
 fn schema_matches_filter(view: &NavigatorView, schema: &SchemaEntry, schema_name: &str) -> bool {
@@ -154,6 +167,8 @@ fn schema_matches_filter(view: &NavigatorView, schema: &SchemaEntry, schema_name
             .any(|(name, _)| contains_filter(view.catalog.resolve(*name), view.filter))
 }
 
+const MAX_FILTERED_TABLES_PER_SCHEMA: usize = 80;
+
 fn render_schema_node(
     ui: &mut egui::Ui,
     view: &NavigatorView,
@@ -165,8 +180,23 @@ fn render_schema_node(
     let is_active_schema = view
         .active_schema
         .is_some_and(|active| active.eq_ignore_ascii_case(schema_name));
+    let schema_matches = contains_filter(schema_name, view.filter);
+    let matching_table_count = if view.filter.is_empty() || schema_matches {
+        schema.tables.len()
+    } else {
+        schema
+            .tables
+            .iter()
+            .filter(|table| contains_filter(view.catalog.resolve(table.name), view.filter))
+            .count()
+    };
+
     let node_id = ui.make_persistent_id(("schema", view.slot_index, schema_name));
     let mut state = CollapsingState::load_with_default_open(ui.ctx(), node_id, is_active_schema);
+    if !view.filter.is_empty() && !schema_matches && matching_table_count > 0 {
+        state.set_open(true);
+    }
+
     let header = ui.horizontal(|ui| {
         state.show_toggle_button(ui, tree_toggle_icon);
         let name_color = if schema.is_system {
@@ -180,7 +210,12 @@ fn render_schema_node(
             if view.activity.loading_schemas.contains(schema_name) {
                 busy_indicator(ui, palette, "");
             } else if schema.l1_loaded {
-                caption(ui, palette, schema.tables.len().to_string());
+                let count_label = if !view.filter.is_empty() && matching_table_count != schema.tables.len() {
+                    format!("{matching_table_count}/{}", schema.tables.len())
+                } else {
+                    schema.tables.len().to_string()
+                };
+                caption(ui, palette, count_label);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let label = egui::Label::new(icon_text(
@@ -219,7 +254,6 @@ fn render_schema_node(
         });
     });
 
-    let schema_matches = contains_filter(schema_name, view.filter);
     state
         .show_body_indented(&header.response, ui, |ui| {
             if !schema.l1_loaded {
@@ -230,12 +264,27 @@ fn render_schema_node(
                 }
                 return;
             }
+            let is_filtering = !view.filter.is_empty();
+            let mut rendered = 0usize;
+            let mut hidden_matches = 0usize;
             for table in &schema.tables {
                 let table_name = view.catalog.resolve(table.name);
                 if !schema_matches && !contains_filter(table_name, view.filter) {
                     continue;
                 }
+                if is_filtering && rendered >= MAX_FILTERED_TABLES_PER_SCHEMA {
+                    hidden_matches += 1;
+                    continue;
+                }
+                rendered += 1;
                 render_table_node(ui, view, schema_name, table, table_name, requests);
+            }
+            if hidden_matches > 0 {
+                caption(
+                    ui,
+                    palette,
+                    format!("+{hidden_matches} more matches — type more to narrow"),
+                );
             }
             if !schema.routines.is_empty() {
                 let matching_routines: Vec<(&str, &str)> = schema
@@ -302,6 +351,16 @@ fn render_table_node(
     let is_active = view.active_table == Some((schema_name, table_name));
     let node_id = ui.make_persistent_id(("table", view.slot_index, schema_name, table_name));
     let mut state = CollapsingState::load_with_default_open(ui.ctx(), node_id, false);
+
+    if !state.is_open() {
+        let row_h = 22.0;
+        let next_y = ui.cursor().top();
+        let clip = ui.clip_rect();
+        if next_y + row_h < clip.top() - 40.0 || next_y > clip.bottom() + 40.0 {
+            ui.allocate_space(egui::vec2(1.0, row_h));
+            return;
+        }
+    }
 
     let header = egui::Frame::new()
         .fill(if is_active {

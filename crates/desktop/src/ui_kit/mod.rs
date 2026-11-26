@@ -107,7 +107,7 @@ pub fn toolbar_divider(ui: &mut Ui, palette: Palette) {
 }
 
 pub fn section_title(ui: &mut Ui, palette: Palette, glyph: &str, title: &str) {
-    ui.label(icon_text(glyph, palette.icon_schema, title, palette.text_primary, 13.5));
+    ui.add(egui::Label::new(icon_text(glyph, palette.icon_schema, title, palette.text_primary, 13.5)).truncate());
 }
 
 pub fn caption(ui: &mut Ui, palette: Palette, text: impl Into<String>) -> Response {

@@ -1,14 +1,16 @@
+use super::navigator::contains_ascii_ignore_case;
 use super::server_form::ServerModalState;
 use super::CottonDataApp;
 use crate::theme::{Palette, GUTTER, RADIUS_CONTROL};
 use crate::ui_kit::{
-    busy_indicator, caption, card_frame, ghost_button, icon, icon_button, icon_text, inset_frame, pill,
-    secondary_button, section_title, status_dot, tree_toggle_icon,
+    busy_indicator, caption, card_frame, ghost_button, icon, icon_button, icon_text, pill, secondary_button,
+    section_title, status_dot, tree_toggle_icon,
 };
 use cottondata_core::{ConnectionStatus, ServerSlot, ServerSlotId};
-use eframe::egui::{self, collapsing_header::CollapsingState, Color32, CornerRadius, Margin, RichText, Sense};
+use eframe::egui::{self, collapsing_header::CollapsingState, Color32, CornerRadius, Margin, RichText, Sense, Stroke};
 
 const SERVER_TITLE_MIN_WIDTH: f32 = 40.0;
+const EXPLORER_SEARCH_ID: &str = "explorer_filter_input";
 
 pub(super) enum ServerAction {
     Select(ServerSlotId),
@@ -34,9 +36,15 @@ impl CottonDataApp {
                 bottom: GUTTER,
             }))
             .show(ctx, |ui| {
-                let panel_w = ui.available_width();
-                ui.set_max_width(panel_w);
-                card_frame(palette).show(ui, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                ui.allocate_rect(rect, Sense::hover());
+                let mut clipped = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                clipped.set_clip_rect(rect.intersect(ui.clip_rect()));
+                card_frame(palette).show(&mut clipped, |ui| {
                     ui.set_max_width(ui.available_width());
                     ui.set_min_size(ui.available_size());
                     self.render_unified_explorer(ui, palette);
@@ -45,55 +53,112 @@ impl CottonDataApp {
     }
 
     fn render_unified_explorer(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        ui.horizontal(|ui| {
-            section_title(ui, palette, icon::TREE_STRUCTURE, "Database Explorer");
-            caption(
-                ui,
-                palette,
-                format!("{}/{}", self.registry.count(), self.registry.max_servers()),
+        let inner_w = ui.available_width();
+        ui.set_max_width(inner_w);
+
+        let (header_rect, _) = ui.allocate_exact_size(egui::vec2(inner_w, 26.0), Sense::hover());
+        let mut header_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(header_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        header_ui.set_clip_rect(header_rect.intersect(ui.clip_rect()));
+        let can_add = !self.registry.is_full();
+        if header_ui
+            .add_enabled_ui(can_add, |ui| icon_button(ui, palette, icon::PLUS, "Add a server"))
+            .inner
+            .clicked()
+        {
+            self.modal = Some(ServerModalState::new_empty());
+        }
+        if header_ui
+            .toggle_value(&mut self.show_system_schemas, RichText::new("System").size(11.5))
+            .on_hover_text("Show system schemas and databases")
+            .changed()
+        {
+            self.mark_session_dirty();
+        }
+        let title_rect = header_ui.available_rect_before_wrap();
+        if title_rect.width() > 24.0 {
+            let mut title_ui = header_ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(title_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_add = !self.registry.is_full();
-                if ui
-                    .add_enabled_ui(can_add, |ui| icon_button(ui, palette, icon::PLUS, "Add a server"))
-                    .inner
-                    .clicked()
-                {
-                    self.modal = Some(ServerModalState::new_empty());
-                }
-                if ui
-                    .toggle_value(&mut self.show_system_schemas, RichText::new("System").size(11.5))
-                    .on_hover_text("Show system schemas and databases")
-                    .changed()
-                {
-                    self.mark_session_dirty();
-                }
-            });
-        });
+            title_ui.set_clip_rect(title_rect.intersect(ui.clip_rect()));
+            let title = if inner_w >= 265.0 {
+                format!("Database Explorer {}/{}", self.registry.count(), self.registry.max_servers())
+            } else {
+                format!("Explorer {}/{}", self.registry.count(), self.registry.max_servers())
+            };
+            section_title(&mut title_ui, palette, icon::TREE_STRUCTURE, &title);
+        }
         ui.add_space(4.0);
 
-        inset_frame(palette)
-            .inner_margin(Margin::symmetric(8, 3))
-            .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(palette.text_muted));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if !self.explorer_filter.is_empty()
-                            && icon_button(ui, palette, icon::X, "Clear filter").clicked()
-                        {
-                            self.explorer_filter.clear();
-                        }
-                        let input_width = ui.available_width().max(40.0);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.explorer_filter)
-                                .hint_text("Filter servers, schemas, tables…")
-                                .frame(false)
-                                .desired_width(input_width),
-                        );
-                    });
-                });
-            });
+        let search_id = egui::Id::new(EXPLORER_SEARCH_ID);
+        let is_search_focused = ui.memory(|m| m.has_focus(search_id));
+        let (search_rect, search_bg_resp) = ui.allocate_exact_size(egui::vec2(inner_w, 30.0), Sense::click());
+        let border_color = if is_search_focused {
+            palette.accent
+        } else {
+            palette.border
+        };
+        ui.painter().rect(
+            search_rect,
+            CornerRadius::same(RADIUS_CONTROL),
+            palette.bg_surface,
+            Stroke::new(1.0, border_color),
+            egui::StrokeKind::Inside,
+        );
+
+        let content_rect = search_rect.shrink2(egui::vec2(8.0, 4.0));
+        let icon_rect = egui::Rect::from_min_size(content_rect.min, egui::vec2(18.0, content_rect.height()));
+        let clear_rect = egui::Rect::from_min_max(
+            egui::pos2((content_rect.right() - 22.0).max(icon_rect.right()), content_rect.top()),
+            content_rect.max,
+        );
+        let input_rect = egui::Rect::from_min_max(
+            egui::pos2(icon_rect.right() + 4.0, content_rect.top()),
+            egui::pos2((clear_rect.left() - 4.0).max(icon_rect.right() + 24.0), content_rect.bottom()),
+        );
+
+        let mut icon_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(icon_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        icon_ui.label(RichText::new(icon::MAGNIFYING_GLASS).size(13.5).color(palette.text_muted));
+
+        let mut input_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(input_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        input_ui.set_clip_rect(input_rect.intersect(ui.clip_rect()));
+        let input_resp = input_ui.add(
+            egui::TextEdit::singleline(&mut self.explorer_filter)
+                .id(search_id)
+                .hint_text("Filter servers, schemas, tables…")
+                .clip_text(true)
+                .frame(false)
+                .desired_width(input_rect.width()),
+        );
+        if search_bg_resp.clicked() && !input_resp.has_focus() {
+            input_resp.request_focus();
+        }
+
+        if !self.explorer_filter.is_empty() {
+            let mut clear_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(clear_rect)
+                    .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
+            );
+            clear_ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
+            if icon_button(&mut clear_ui, palette, icon::X, "Clear filter").clicked() {
+                self.explorer_filter.clear();
+                input_resp.request_focus();
+            }
+        }
         ui.add_space(6.0);
 
         if self.registry.count() == 0 {
@@ -186,7 +251,7 @@ impl CottonDataApp {
     }
 
     fn server_matches_filter(&self, slot: &ServerSlot, filter: &str) -> bool {
-        if slot.profile.name.to_ascii_lowercase().contains(filter) {
+        if contains_ascii_ignore_case(&slot.profile.name, filter) {
             return true;
         }
         let Some(catalog) = &self.catalogs[slot.slot_id.index()] else {
@@ -196,15 +261,15 @@ impl CottonDataApp {
             if schema.is_system && !self.show_system_schemas {
                 return false;
             }
-            catalog.resolve(schema.name).to_ascii_lowercase().contains(filter)
+            contains_ascii_ignore_case(catalog.resolve(schema.name), filter)
                 || schema
                     .tables
                     .iter()
-                    .any(|t| catalog.resolve(t.name).to_ascii_lowercase().contains(filter))
+                    .any(|t| contains_ascii_ignore_case(catalog.resolve(t.name), filter))
                 || schema
                     .routines
                     .iter()
-                    .any(|(r, _)| catalog.resolve(*r).to_ascii_lowercase().contains(filter))
+                    .any(|(r, _)| contains_ascii_ignore_case(catalog.resolve(*r), filter))
         })
     }
 
