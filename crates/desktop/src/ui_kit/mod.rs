@@ -134,6 +134,8 @@ pub struct BannerState {
     pub hovered: bool,
 }
 
+const DISMISS_BUTTON_ALLOWANCE: f32 = 28.0;
+
 pub fn banner(
     ui: &mut Ui,
     palette: Palette,
@@ -151,11 +153,17 @@ pub fn banner(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             if is_dismissible {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.horizontal(|ui| {
+                    let message_width = (ui.available_width() - DISMISS_BUTTON_ALLOWANCE).max(0.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(message_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(message_width);
+                            ui.add(egui::Label::new(icon_text(glyph, tone, message, palette.text_primary, 12.5)).wrap());
+                        },
+                    );
                     dismissed = icon_button(ui, palette, icon::X, "Dismiss").clicked();
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(egui::Label::new(icon_text(glyph, tone, message, palette.text_primary, 12.5)).wrap());
-                    });
                 });
             } else {
                 ui.add(egui::Label::new(icon_text(glyph, tone, message, palette.text_primary, 12.5)).wrap());

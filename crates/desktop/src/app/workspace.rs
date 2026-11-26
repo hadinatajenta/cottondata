@@ -1,6 +1,6 @@
 use super::query_tab::BottomDeckTab;
 use super::{CottonDataApp, ToastKind};
-use crate::theme::{Palette, GUTTER, RADIUS_CARD};
+use crate::theme::{Palette, GUTTER, RADIUS_CARD, RADIUS_CONTROL};
 use crate::ui_kit::{banner, caption, card_frame, document_tab, icon, icon_button, icon_text, underline_tab};
 use eframe::egui::{self, CornerRadius, Margin, Shape, Stroke};
 use std::time::{Duration, Instant};
@@ -13,7 +13,56 @@ const RESULT_TABS: [(BottomDeckTab, &str, &str); 5] = [
     (BottomDeckTab::History, icon::CLOCK_COUNTER_CLOCKWISE, "History"),
 ];
 
+const TOAST_WIDTH: f32 = 380.0;
+const TOAST_EDGE_OFFSET: f32 = 16.0;
+
 impl CottonDataApp {
+    fn render_toast_overlay(&mut self, ctx: &egui::Context, panel_rect: egui::Rect, palette: Palette) {
+        let Some(toast) = self.toast_banner.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let (tone, glyph) = match toast.kind {
+            ToastKind::Success => (palette.success, icon::CHECK_CIRCLE),
+            ToastKind::Info => (palette.accent, icon::INFO),
+            ToastKind::Warning => (palette.warning, icon::WARNING),
+            ToastKind::Error => (palette.danger, icon::WARNING),
+        };
+        let toast_width = TOAST_WIDTH.min(panel_rect.width() - TOAST_EDGE_OFFSET * 2.0).max(160.0);
+        let anchor = panel_rect.right_bottom() - egui::vec2(TOAST_EDGE_OFFSET, TOAST_EDGE_OFFSET);
+        let state = egui::Area::new(egui::Id::new("toast_overlay"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(anchor)
+            .interactable(true)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(palette.bg_card)
+                    .corner_radius(CornerRadius::same(RADIUS_CONTROL))
+                    .shadow(ctx.style().visuals.popup_shadow)
+                    .show(ui, |ui| {
+                        ui.set_width(toast_width);
+                        banner(ui, palette, tone, glyph, &toast.message, true)
+                    })
+                    .inner
+            })
+            .inner;
+
+        if state.dismissed {
+            self.toast_banner = None;
+        } else if state.hovered {
+            if let Some(active) = self.toast_banner.as_mut() {
+                active.created_at = now;
+            }
+            ctx.request_repaint_after(Duration::from_millis(250));
+        } else if let Some(remaining) = toast.remaining(now).filter(|left| !left.is_zero()) {
+            ctx.request_repaint_after(remaining);
+        } else {
+            self.toast_banner = None;
+            ctx.request_repaint();
+        }
+    }
+
     pub(super) fn render_workspace(&mut self, ctx: &egui::Context, palette: Palette) {
         egui::CentralPanel::default()
             .frame(
@@ -22,35 +71,7 @@ impl CottonDataApp {
                     .inner_margin(Margin::same(GUTTER)),
             )
             .show(ctx, |ui| {
-                if let Some(toast) = self.toast_banner.clone() {
-                    let now = Instant::now();
-                    let (tone, glyph) = match toast.kind {
-                        ToastKind::Success => (palette.success, icon::CHECK_CIRCLE),
-                        ToastKind::Info => (palette.accent, icon::INFO),
-                        ToastKind::Warning => (palette.warning, icon::WARNING),
-                        ToastKind::Error => (palette.danger, icon::WARNING),
-                    };
-                    let state = banner(ui, palette, tone, glyph, &toast.message, true);
-                    if state.dismissed {
-                        self.toast_banner = None;
-                    } else if state.hovered {
-                        if let Some(active) = self.toast_banner.as_mut() {
-                            active.created_at = now;
-                        }
-                        ctx.request_repaint_after(Duration::from_millis(250));
-                    } else if let Some(remaining) = toast.remaining(now) {
-                        if remaining.is_zero() {
-                            self.toast_banner = None;
-                            ctx.request_repaint();
-                        } else {
-                            ctx.request_repaint_after(remaining);
-                        }
-                    } else {
-                        self.toast_banner = None;
-                        ctx.request_repaint();
-                    }
-                    ui.add_space(f32::from(GUTTER));
-                }
+                self.render_toast_overlay(ctx, ui.max_rect(), palette);
 
                 let show_sql_editor = self.tabs[self.active_tab_idx].show_sql_editor;
                 if show_sql_editor {
