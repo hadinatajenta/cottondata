@@ -76,7 +76,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.8.0
+# CottonData CLI v0.8.1
 open /Applications/CottonData.app
 ```
 
@@ -187,7 +187,7 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 - **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), and filters across servers with viewport culling for schemas containing hundreds of tables.
 - **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `mssql://`, `sqlserver://`), show/hide password, Unix sockets (MySQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
 - **Configurable server list**: 1 to 64 saved servers (default 10) from Settings. Saved servers cost almost no memory; only connected servers use RAM. `Cmd/Ctrl+1..0` switches the first ten.
-- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), **Parameterized Queries** (`:user_id`, `?`) with a pre-run value dialog & per-query value memory, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware completion, and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), **Parameterized Queries** (`:user_id`, `?`) with a pre-run value dialog & per-query value memory, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware **autocomplete popup** at the caret (`↑/↓`, `Enter`/`Tab`, `Esc`, `Ctrl+Space`), and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
 - **Searchable History & Saved Queries / Snippets**: filter execution history by SQL, server, schema, or status without overwriting active consoles; save reusable SQL snippets (`Cmd/Ctrl+Shift+S`) with **Global** or **per-server** scope, folders, and pin-to-top.
 - **Result Grid, Foreign Key Navigation & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), **Foreign Key Navigation** (`Cmd+Click` or right-click outbound FK cells to jump to referenced rows + right-click *Find referencing rows* for inbound child tables), server-side `WHERE` filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
 - **DataGrip-style Inline Cell Editing**: edit cells directly inside table tabs and single-table `SELECT` console results (`Double-click`, `Enter`, `F2`, or type-to-edit). Tracks original column names (`org_name`), supports `NULL`/`DEFAULT`, lazy-loads >4 KiB truncated cells, commits atomically (using `SAVEPOINT` inside open transactions), saves directly with `Cmd/Ctrl+S` on non-PROD while requiring **SQL Preview** on `PROD`, and protects staged edits with an **Unsaved Changes** dialog.
@@ -203,6 +203,7 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 |---|---|---|
 | Run statement at cursor (or selected SQL) | `Cmd+Enter` | `Ctrl+Enter` |
 | Run all statements into separate result tabs | `Cmd+Shift+Enter` | `Ctrl+Shift+Enter` |
+| Open autocomplete / accept / dismiss | `Ctrl+Space` / `Enter` or `Tab` / `Esc` | `Ctrl+Space` / `Enter` or `Tab` / `Esc` |
 | New SQL console tab | `Cmd+T` | `Ctrl+T` |
 | Reopen last closed tab | `Cmd+Shift+T` | `Ctrl+Shift+T` |
 | Close active tab | `Cmd+W` | `Ctrl+W` |

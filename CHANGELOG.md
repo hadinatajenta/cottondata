@@ -2,6 +2,14 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.8.1] — 2026-11-26
+
+### Changed
+- **SQL autocomplete popup (`completion_popup.rs`)**: completions now appear in a floating popup anchored at the caret instead of a button row under the editor, with kind icons (table, column, function, keyword, system variable), matched-prefix highlight, and right-aligned details. Navigate with `↑/↓`, accept with `Enter`/`Tab`, dismiss with `Esc`, reopen with `Ctrl+Space`.
+
+### Fixed
+- Accepting a completion now moves the caret to the end of the inserted word and keeps editor focus.
+
 ## [0.8.0] — 2026-11-26
 
 ### Added
