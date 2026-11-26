@@ -2,9 +2,7 @@ use super::server_form::ServerModalState;
 use super::sessions::SessionModalState;
 use super::CottonDataApp;
 use crate::theme::{AppTheme, Palette, GUTTER};
-use crate::ui_kit::{
-    card_frame, ghost_button, icon, icon_button, icon_text, pill, primary_button, tinted_ghost_button, toolbar_divider,
-};
+use crate::ui_kit::{card_frame, ghost_button, icon, icon_button, icon_text, pill, primary_button, toolbar_divider};
 use crate::worker::SlotCmd;
 use cottondata_core::{ServerSlotId, MAX_SERVERS};
 use eframe::egui::{self, Color32, Margin, RichText};
@@ -100,74 +98,6 @@ impl CottonDataApp {
         }
     }
 
-    fn render_transaction_group(&mut self, ui: &mut egui::Ui, palette: Palette, show_labels: bool) {
-        let active = self
-            .active_slot
-            .and_then(|slot_id| self.registry.get(slot_id))
-            .and_then(|slot| {
-                slot.runtime
-                    .as_ref()
-                    .map(|runtime| (slot.slot_id, runtime.autocommit, runtime.in_transaction))
-            });
-        let has_runtime = active.is_some();
-        let (is_autocommit, is_in_transaction) = active.map(|(_, auto, in_tx)| (auto, in_tx)).unwrap_or((true, false));
-        let can_control_transaction = has_runtime && (!is_autocommit || is_in_transaction);
-        let label_for = |text: &'static str| if show_labels { text } else { "" };
-
-        let autocommit_label = if is_autocommit { "Auto-commit" } else { "Manual commit" };
-        let autocommit_glyph = if is_autocommit {
-            icon::LIGHTNING
-        } else {
-            icon::HAND_PALM
-        };
-        let toggle_clicked = ghost_button(ui, palette, autocommit_glyph, label_for(autocommit_label), has_runtime)
-            .on_hover_text("Toggle MySQL autocommit for this session")
-            .clicked();
-        let begin_clicked = ghost_button(
-            ui,
-            palette,
-            icon::FLOW_ARROW,
-            label_for("Begin"),
-            can_control_transaction,
-        )
-        .on_hover_text("BEGIN")
-        .clicked();
-        let commit_clicked = tinted_ghost_button(
-            ui,
-            palette.success,
-            icon::CHECK_CIRCLE,
-            label_for("Commit"),
-            can_control_transaction,
-        )
-        .on_hover_text("COMMIT")
-        .clicked();
-        let rollback_clicked = tinted_ghost_button(
-            ui,
-            palette.danger,
-            icon::ARROW_COUNTER_CLOCKWISE,
-            label_for("Rollback"),
-            can_control_transaction,
-        )
-        .on_hover_text("ROLLBACK")
-        .clicked();
-
-        let Some((slot_id, _, _)) = active else {
-            return;
-        };
-        if toggle_clicked {
-            self.hub.send(slot_id, SlotCmd::SetAutocommit(!is_autocommit));
-        }
-        if begin_clicked {
-            self.hub.send(slot_id, SlotCmd::BeginTx);
-        }
-        if commit_clicked {
-            self.hub.send(slot_id, SlotCmd::CommitTx);
-        }
-        if rollback_clicked {
-            self.hub.send(slot_id, SlotCmd::RollbackTx);
-        }
-    }
-
     fn render_connection_group(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let add_label = format!("Server {}/{}", self.registry.count(), MAX_SERVERS);
         if primary_button(ui, palette, icon::PLUS, &add_label, !self.registry.is_full())
@@ -249,22 +179,25 @@ impl CottonDataApp {
             .unwrap_or_default();
 
         let mut chosen_schema = current_schema.clone();
-        egui::ComboBox::from_id_salt("active_schema_combo")
-            .selected_text(icon_text(
-                icon::STACK,
-                palette.icon_table,
-                &current_schema,
-                palette.text_primary,
-                13.0,
-            ))
-            .width(150.0)
-            .show_ui(ui, |ui| {
-                for schema_name in &schema_names {
-                    ui.selectable_value(&mut chosen_schema, schema_name.clone(), schema_name);
-                }
-            });
+        let is_command_pending = self.slot_activity[slot_id.index()].is_session_command_pending;
+        ui.add_enabled_ui(!is_command_pending, |ui| {
+            egui::ComboBox::from_id_salt("active_schema_combo")
+                .selected_text(icon_text(
+                    icon::STACK,
+                    palette.icon_table,
+                    &current_schema,
+                    palette.text_primary,
+                    13.0,
+                ))
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for schema_name in &schema_names {
+                        ui.selectable_value(&mut chosen_schema, schema_name.clone(), schema_name);
+                    }
+                })
+        });
         if chosen_schema != current_schema && chosen_schema != NO_SCHEMA_LABEL {
-            self.hub.send(slot_id, SlotCmd::SetSchema(chosen_schema));
+            self.send_session_command(slot_id, SlotCmd::SetSchema(chosen_schema));
         }
     }
 

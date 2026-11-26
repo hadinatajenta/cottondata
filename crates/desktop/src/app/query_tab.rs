@@ -33,6 +33,8 @@ pub(super) struct QueryTab {
     pub(super) column_widths: Vec<f32>,
     pub(super) row_selection: RowSelection,
     pub(super) is_inspector_open: bool,
+    pub(super) is_counting_rows: bool,
+    pub(super) is_submitting_mutations: bool,
 }
 
 impl QueryTab {
@@ -59,6 +61,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            is_counting_rows: false,
+            is_submitting_mutations: false,
         }
     }
 
@@ -87,6 +91,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            is_counting_rows: false,
+            is_submitting_mutations: false,
         }
     }
 
@@ -132,6 +138,8 @@ impl QueryTab {
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
+            is_counting_rows: false,
+            is_submitting_mutations: false,
         }
     }
 

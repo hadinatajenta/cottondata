@@ -2,7 +2,7 @@ use super::result_table::{compute_column_widths, render_result_table, ResultTabl
 use super::CottonDataApp;
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
-use crate::ui_kit::{empty_state, icon, icon_button, icon_text, inset_frame, primary_button};
+use crate::ui_kit::{empty_state, icon, icon_button, icon_text, inset_frame, loading_state, primary_button};
 use crate::worker::SlotCmd;
 use cottondata_core::ServerSlotId;
 use cottondata_grid::{CellValue, SortDirection};
@@ -36,7 +36,11 @@ impl CottonDataApp {
                 |ui| {
                     let tab = &mut self.tabs[self.active_tab_idx];
                     let Some(page) = &tab.page else {
-                        empty_state(ui, p, icon::ROWS, "Run a query or open a table from the navigator.");
+                        if tab.is_running {
+                            loading_state(ui, p, "Running query…");
+                        } else {
+                            empty_state(ui, p, icon::ROWS, "Run a query or open a table from the navigator.");
+                        }
                         return;
                     };
 
@@ -53,7 +57,7 @@ impl CottonDataApp {
                         selected_row_count: tab.row_selection.sorted_rows_below(page.row_count).len(),
                         column_widths: &tab.column_widths,
                         order_by: tab.filter_sort.order_by.as_ref(),
-                        is_sortable: bound_table.is_some(),
+                        is_sortable: bound_table.is_some() && !tab.is_running,
                     };
                     let interaction = render_result_table(ui, &view);
                     if let Some(column_index) = interaction.clicked_header.filter(|_| view.is_sortable) {

@@ -1,9 +1,11 @@
+mod activity;
 mod data_grid;
 mod events;
 mod grid_table;
 mod inspectors;
 mod modals;
 mod navigator;
+mod query_actions;
 mod query_tab;
 mod result_table;
 mod row_selection;
@@ -13,14 +15,15 @@ mod sessions;
 mod sql_editor;
 mod table_actions;
 mod top_bar;
+mod transaction_bar;
 mod workspace;
 
 use crate::theme::{install_fonts, AppTheme};
 use crate::worker::{SlotCmd, WorkerHub};
+use activity::SlotActivity;
 use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, MAX_SERVERS};
 use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_mysql::{ProcessEntry, ServerHealthMetrics};
-use cottondata_sql::{split_statements, statement_at_offset};
 use cottondata_storage::{AppStorage, ConnectedServerState, QueryHistoryItem, SessionsStore};
 use eframe::egui;
 use query_tab::{BottomDeckTab, QueryTab};
@@ -55,6 +58,7 @@ pub struct CottonDataApp {
     sessions_store: SessionsStore,
     desired_connected_ids: HashSet<String>,
     pending_restore: [Option<ConnectedServerState>; MAX_SERVERS],
+    slot_activity: [SlotActivity; MAX_SERVERS],
     session_dirty_since: Option<Instant>,
     last_ping_at: Instant,
 }
@@ -105,6 +109,7 @@ impl CottonDataApp {
             sessions_store,
             desired_connected_ids: HashSet::new(),
             pending_restore: std::array::from_fn(|_| None),
+            slot_activity: std::array::from_fn(|_| SlotActivity::default()),
             session_dirty_since: None,
             last_ping_at: Instant::now(),
         };
@@ -151,6 +156,13 @@ impl CottonDataApp {
     }
 
     pub(super) fn connect_slot(&mut self, slot: ServerSlotId) {
+        let is_busy_or_connected = self
+            .registry
+            .get(slot)
+            .is_some_and(|s| matches!(s.status, ConnectionStatus::Connecting | ConnectionStatus::Connected));
+        if is_busy_or_connected {
+            return;
+        }
         self.connect_slot_internal(slot, true);
     }
 
@@ -181,66 +193,6 @@ impl CottonDataApp {
         }
         self.hub.send(slot, SlotCmd::Disconnect);
         self.persist_sessions_now();
-    }
-
-    pub(super) fn open_table_tab(&mut self, slot: ServerSlotId, schema: String, table: String) {
-        let page_size = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
-        let tab = QueryTab::new_table(id, slot, schema.clone(), table.clone(), page_size);
-        let filter_sort = tab.filter_sort.clone();
-        self.tabs.push(tab);
-        self.active_tab_idx = self.tabs.len() - 1;
-        self.hub.send(
-            slot,
-            SlotCmd::LoadTablePage {
-                tab_id: id,
-                schema,
-                table,
-                filter_sort,
-            },
-        );
-        self.persist_sessions_now();
-    }
-
-    pub(super) fn execute_active_tab(&mut self, run_all: bool) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab_idx) else {
-            return;
-        };
-        let slot = tab.slot.or(self.active_slot);
-        let Some(slot) = slot else {
-            self.toast_banner = Some(("Add and connect a MySQL server first.".into(), true));
-            return;
-        };
-        tab.slot = Some(slot);
-        let max_rows = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
-
-        let sql_to_run = if run_all {
-            let stmts = split_statements(&tab.sql);
-            stmts
-                .last()
-                .map(|s| s.sql.to_string())
-                .unwrap_or_else(|| tab.sql.trim().to_string())
-        } else {
-            statement_at_offset(&tab.sql, tab.cursor_byte)
-                .map(|s| s.sql.to_string())
-                .unwrap_or_else(|| tab.sql.trim().to_string())
-        };
-
-        if sql_to_run.trim().is_empty() {
-            return;
-        }
-        tab.is_running = true;
-        tab.last_status_msg = "Executing query…".into();
-        let tab_id = tab.id;
-        self.hub.send(
-            slot,
-            SlotCmd::ExecuteSql {
-                tab_id,
-                sql: sql_to_run,
-                max_rows,
-            },
-        );
     }
 
     pub(super) fn handle_shortcuts(&mut self, ctx: &egui::Context) {

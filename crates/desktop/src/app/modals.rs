@@ -43,6 +43,9 @@ impl CottonDataApp {
                 });
             if submit_now {
                 if let Some(slot) = self.tabs[self.active_tab_idx].slot.or(self.active_slot) {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.is_submitting_mutations = true;
+                    }
                     self.hub.send(slot, SlotCmd::SubmitMutations { tab_id, statements });
                 }
                 self.sql_preview_modal = None;

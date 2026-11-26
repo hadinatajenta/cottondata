@@ -18,6 +18,7 @@ impl CottonDataApp {
                         s.runtime = Some(runtime);
                     }
                     self.catalogs[slot.index()] = Some(catalog);
+                    self.slot_activity[slot.index()].reset();
                     if let Some(restore) = self.pending_restore[slot.index()].take() {
                         if let Some(saved_schema) = restore.active_schema {
                             if current_schema.as_deref() != Some(saved_schema.as_str()) {
@@ -40,6 +41,7 @@ impl CottonDataApp {
                     self.catalogs[slot.index()] = None;
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
+                    self.clear_slot_activity(slot);
                     self.persist_sessions_now();
                     self.toast_banner = Some((format!("Disconnected slot {slot}"), false));
                 }
@@ -54,6 +56,7 @@ impl CottonDataApp {
                     self.catalogs[slot.index()] = None;
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
+                    self.clear_slot_activity(slot);
                     if let Some(s) = self.registry.get_mut(slot) {
                         s.runtime = None;
                     }
@@ -75,6 +78,7 @@ impl CottonDataApp {
                 WorkerEvent::Error { slot, tab_id, error } => {
                     let msg = error.to_string();
                     if tab_id.is_none() {
+                        self.slot_activity[slot.index()].reset();
                         if let Some(s) = self.registry.get_mut(slot) {
                             if matches!(s.status, ConnectionStatus::Connecting) {
                                 s.status = ConnectionStatus::Error(msg.clone());
@@ -84,6 +88,8 @@ impl CottonDataApp {
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tid) {
                             tab.is_running = false;
+                            tab.is_counting_rows = false;
+                            tab.is_submitting_mutations = false;
                             tab.last_status_msg = format!("Error: {msg}");
                         }
                     }
@@ -91,8 +97,14 @@ impl CottonDataApp {
                 }
                 WorkerEvent::CatalogUpdated { slot, catalog } => {
                     self.catalogs[slot.index()] = Some(catalog);
+                    self.slot_activity[slot.index()].loading_schemas.clear();
                 }
                 WorkerEvent::TableDetailLoaded { schema, table, detail } => {
+                    for activity in &mut self.slot_activity {
+                        if activity.is_loading_table_detail(&schema, &table) {
+                            activity.loading_table_detail = None;
+                        }
+                    }
                     self.ddl_view = Some((schema, table, detail));
                     self.bottom_tab = BottomDeckTab::DdlInspector;
                 }
@@ -173,6 +185,7 @@ impl CottonDataApp {
                 }
                 WorkerEvent::RowCountLoaded { tab_id, total_rows } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.is_counting_rows = false;
                         if let Some(page) = tab.page.as_mut() {
                             page.total_rows_known = Some(total_rows);
                         }
@@ -189,6 +202,7 @@ impl CottonDataApp {
                         false,
                     ));
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.is_submitting_mutations = false;
                         tab.mutator.revert_all();
                         if let Some((schema, table)) = tab.bound_table.clone() {
                             tab.is_running = true;
@@ -212,6 +226,7 @@ impl CottonDataApp {
                     self.bottom_tab = BottomDeckTab::ExplainPlan;
                 }
                 WorkerEvent::RuntimeUpdated { slot, runtime } => {
+                    self.slot_activity[slot.index()].is_session_command_pending = false;
                     if let Some(s) = self.registry.get_mut(slot) {
                         s.runtime = Some(runtime);
                     }
@@ -222,8 +237,18 @@ impl CottonDataApp {
                 }
                 WorkerEvent::HealthLoaded { slot, metrics } => {
                     self.health[slot.index()] = Some(metrics);
+                    self.slot_activity[slot.index()].is_refreshing_monitor = false;
                 }
             }
+        }
+    }
+
+    fn clear_slot_activity(&mut self, slot: cottondata_core::ServerSlotId) {
+        self.slot_activity[slot.index()].reset();
+        for tab in self.tabs.iter_mut().filter(|tab| tab.slot == Some(slot)) {
+            tab.is_running = false;
+            tab.is_counting_rows = false;
+            tab.is_submitting_mutations = false;
         }
     }
 

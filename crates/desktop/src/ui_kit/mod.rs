@@ -7,7 +7,7 @@ use eframe::egui::{
 mod canvas;
 mod tabs;
 
-pub use canvas::{empty_state, tree_toggle_icon};
+pub use canvas::{empty_state, loading_state, tree_toggle_icon};
 pub use egui_phosphor::regular as icon;
 pub use tabs::{document_tab, underline_tab};
 
@@ -147,4 +147,11 @@ pub fn banner(ui: &mut Ui, palette: Palette, tone: Color32, glyph: &str, message
             });
         });
     is_dismissed
+}
+
+pub fn busy_indicator(ui: &mut Ui, palette: Palette, message: &str) {
+    ui.add(egui::Spinner::new().size(13.0).color(palette.accent));
+    if !message.is_empty() {
+        caption(ui, palette, message);
+    }
 }

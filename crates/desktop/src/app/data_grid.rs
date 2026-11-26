@@ -1,7 +1,8 @@
 use super::CottonDataApp;
 use crate::theme::Palette;
 use crate::ui_kit::{
-    caption, ghost_button, icon, icon_button, icon_text, primary_button, tinted_ghost_button, toolbar_divider,
+    busy_indicator, caption, ghost_button, icon, icon_button, icon_text, primary_button, tinted_ghost_button,
+    toolbar_divider,
 };
 use crate::worker::SlotCmd;
 use cottondata_grid::{export_rows, ExportFormat};
@@ -26,6 +27,11 @@ impl CottonDataApp {
 
         ui.horizontal_wrapped(|ui| {
             let tab = &mut self.tabs[self.active_tab_idx];
+            let is_busy = tab.is_running;
+            if is_busy && tab.page.is_some() {
+                busy_indicator(ui, p, "Loading…");
+                toolbar_divider(ui, p);
+            }
             if bound_table.is_some() {
                 ui.label(icon_text(icon::FUNNEL, p.accent, "WHERE", p.text_muted, 11.5));
                 let filter_resp = ui.add(
@@ -35,12 +41,12 @@ impl CottonDataApp {
                         .desired_width(240.0),
                 );
                 let is_submitted = filter_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if is_submitted || ghost_button(ui, p, icon::CHECK, "Apply", true).clicked() {
+                if (is_submitted && !is_busy) || ghost_button(ui, p, icon::CHECK, "Apply", !is_busy).clicked() {
                     tab.filter_sort.page_index = 0;
                     reload_page = true;
                 }
                 toolbar_divider(ui, p);
-                let has_previous = tab.filter_sort.page_index > 0;
+                let has_previous = tab.filter_sort.page_index > 0 && !is_busy;
                 if ui
                     .add_enabled_ui(has_previous, |ui| icon_button(ui, p, icon::CARET_LEFT, "Previous page"))
                     .inner
@@ -50,7 +56,7 @@ impl CottonDataApp {
                     reload_page = true;
                 }
                 caption(ui, p, format!("Page {}", tab.filter_sort.page_index + 1));
-                let has_more = tab.page.as_ref().map(|pg| pg.has_more_rows).unwrap_or(false);
+                let has_more = !is_busy && tab.page.as_ref().map(|pg| pg.has_more_rows).unwrap_or(false);
                 if ui
                     .add_enabled_ui(has_more, |ui| icon_button(ui, p, icon::CARET_RIGHT, "Next page"))
                     .inner
@@ -65,7 +71,9 @@ impl CottonDataApp {
                     .and_then(|pg| pg.total_rows_known)
                     .map(|n| format!("{n} rows"))
                     .unwrap_or_else(|| "Count rows".into());
-                if ghost_button(ui, p, icon::HASH, &total_label, true).clicked() {
+                if tab.is_counting_rows {
+                    busy_indicator(ui, p, "Counting…");
+                } else if ghost_button(ui, p, icon::HASH, &total_label, !is_busy).clicked() {
                     count_rows_req = true;
                 }
             }
@@ -102,10 +110,13 @@ impl CottonDataApp {
                 if tab.mutator.has_changes() {
                     let (deletes, updates, inserts) = tab.mutator.pending_summary();
                     let review_label = format!("Review changes  D{deletes} U{updates} I{inserts}");
-                    if primary_button(ui, p, icon::FLOPPY_DISK, &review_label, true).clicked() {
+                    let can_review = !is_busy && !tab.is_submitting_mutations;
+                    if tab.is_submitting_mutations {
+                        busy_indicator(ui, p, "Committing…");
+                    } else if primary_button(ui, p, icon::FLOPPY_DISK, &review_label, can_review).clicked() {
                         preview_req = true;
                     }
-                    if ghost_button(ui, p, icon::ARROW_U_UP_LEFT, "Revert all", true).clicked() {
+                    if ghost_button(ui, p, icon::ARROW_U_UP_LEFT, "Revert all", can_review).clicked() {
                         tab.mutator.revert_all();
                     }
                 }
@@ -145,7 +156,8 @@ impl CottonDataApp {
 
         if count_rows_req {
             if let (Some(slot), Some((schema, table))) = (active_slot, bound_table.clone()) {
-                let tab = &self.tabs[self.active_tab_idx];
+                let tab = &mut self.tabs[self.active_tab_idx];
+                tab.is_counting_rows = true;
                 self.hub.send(
                     slot,
                     SlotCmd::CountTableRows {

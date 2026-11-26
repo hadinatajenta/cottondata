@@ -152,7 +152,11 @@ fn render_server_row(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                status_dot(ui, status_color);
+                if matches!(slot.status, ConnectionStatus::Connecting) {
+                    ui.add(egui::Spinner::new().size(10.0).color(palette.warning));
+                } else {
+                    status_dot(ui, status_color);
+                }
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - SERVER_ROW_BADGE_WIDTH).max(40.0));
                     let title = format!("{} {}", slot_id, slot.profile.name);

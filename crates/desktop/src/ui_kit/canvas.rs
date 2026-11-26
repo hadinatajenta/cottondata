@@ -45,3 +45,16 @@ pub fn empty_state(ui: &mut Ui, palette: Palette, glyph: &str, message: &str) {
         });
     });
 }
+
+pub fn loading_state(ui: &mut Ui, palette: Palette, message: &str) {
+    let rect = ui.available_rect_before_wrap();
+    paint_dot_grid(ui, rect, palette.dot_grid);
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space((rect.height() / 2.0 - 24.0).max(0.0));
+            ui.add(egui::Spinner::new().size(22.0).color(palette.accent));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(message).size(13.0).color(palette.text_muted));
+        });
+    });
+}

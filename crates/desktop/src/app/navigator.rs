@@ -1,8 +1,10 @@
+use super::activity::SlotActivity;
+use super::query_tab::BottomDeckTab;
 use super::CottonDataApp;
 use crate::column_glyph::column_type_glyph;
 use crate::theme::{Palette, RADIUS_CONTROL};
 use crate::ui_kit::{
-    caption, ghost_button, icon, icon_button, icon_text, inset_frame, section_title, tree_toggle_icon,
+    busy_indicator, caption, ghost_button, icon, icon_button, icon_text, inset_frame, section_title, tree_toggle_icon,
 };
 use crate::worker::SlotCmd;
 use cottondata_introspect::{SchemaCatalog, SchemaEntry, TableEntry, TableKind};
@@ -23,6 +25,7 @@ struct NavigatorView<'a> {
     slot_index: usize,
     filter: &'a str,
     active_table: Option<(&'a str, &'a str)>,
+    activity: &'a SlotActivity,
 }
 
 impl CottonDataApp {
@@ -77,6 +80,7 @@ impl CottonDataApp {
             slot_index: slot_id.index(),
             filter: &filter,
             active_table,
+            activity: &self.slot_activity[slot_id.index()],
         };
         let mut requests = NavigatorRequests::default();
 
@@ -102,14 +106,24 @@ impl CottonDataApp {
                 }
             });
 
-        if let Some(schema) = requests.load_schema {
+        let activity = &mut self.slot_activity[slot_id.index()];
+        if let Some(schema) = requests
+            .load_schema
+            .filter(|schema| !activity.loading_schemas.contains(schema))
+        {
+            activity.loading_schemas.insert(schema.clone());
             self.hub.send(slot_id, SlotCmd::LoadSchemaL1 { schema });
         }
         if let Some((schema, table)) = requests.open_table {
             self.open_table_tab(slot_id, schema, table);
         }
         if let Some((schema, table)) = requests.load_table_detail {
-            self.hub.send(slot_id, SlotCmd::LoadTableL2 { schema, table });
+            let activity = &mut self.slot_activity[slot_id.index()];
+            if !activity.is_loading_table_detail(&schema, &table) {
+                activity.loading_table_detail = Some((schema.clone(), table.clone()));
+                self.bottom_tab = BottomDeckTab::DdlInspector;
+                self.hub.send(slot_id, SlotCmd::LoadTableL2 { schema, table });
+            }
         }
     }
 }
@@ -155,7 +169,9 @@ fn render_schema_node(
         if ui.add(label).clicked() {
             state.toggle(ui);
         }
-        if schema.l1_loaded {
+        if view.activity.loading_schemas.contains(schema_name) {
+            busy_indicator(ui, palette, "");
+        } else if schema.l1_loaded {
             caption(ui, palette, schema.tables.len().to_string());
         }
     });
@@ -164,7 +180,9 @@ fn render_schema_node(
     state
         .show_body_indented(&header.response, ui, |ui| {
             if !schema.l1_loaded {
-                if ghost_button(ui, palette, icon::ARROW_CLOCKWISE, "Load tables", true).clicked() {
+                if view.activity.loading_schemas.contains(schema_name) {
+                    ui.horizontal(|ui| busy_indicator(ui, palette, "Loading tables…"));
+                } else if ghost_button(ui, palette, icon::ARROW_CLOCKWISE, "Load tables", true).clicked() {
                     requests.load_schema = Some(schema_name.to_string());
                 }
                 return;
@@ -212,7 +230,9 @@ fn render_table_node(
                     state.show_toggle_button(ui, tree_toggle_icon);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, palette, icon::CODE, "Inspect DDL and indexes").clicked() {
+                    if view.activity.is_loading_table_detail(schema_name, table_name) {
+                        busy_indicator(ui, palette, "");
+                    } else if icon_button(ui, palette, icon::CODE, "Inspect DDL and indexes").clicked() {
                         requests.load_table_detail = Some((schema_name.to_string(), table_name.to_string()));
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {

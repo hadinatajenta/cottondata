@@ -214,6 +214,18 @@ fn emit(tx: &Sender<WorkerEvent>, ctx: &Option<egui::Context>, ev: WorkerEvent) 
     }
 }
 
+fn emit_not_connected(tx: &Sender<WorkerEvent>, ctx: &Option<egui::Context>, slot: ServerSlotId, tab_id: Option<u64>) {
+    emit(
+        tx,
+        ctx,
+        WorkerEvent::Error {
+            slot,
+            tab_id,
+            error: MySqlError::message("Not connected to this server"),
+        },
+    );
+}
+
 fn slot_worker_loop(
     slot: ServerSlotId,
     rx: Receiver<SlotCmd>,
@@ -284,7 +296,10 @@ fn slot_worker_loop(
                 }
             }
             SlotCmd::LoadTableL2 { schema, table } => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match catalog.introspect_table_l2(sess, &schema, &table) {
                     Ok(detail) => emit(
                         &tx,
@@ -334,7 +349,10 @@ fn slot_worker_loop(
                 table,
                 filter_sort,
             } => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, Some(tab_id));
+                    continue;
+                };
                 let sql = filter_sort.build_select_sql(&schema, &table);
                 match sess.execute_sql(&sql, filter_sort.page_size) {
                     Ok(outcome) => {
@@ -367,7 +385,10 @@ fn slot_worker_loop(
                 table,
                 filter_sort,
             } => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, Some(tab_id));
+                    continue;
+                };
                 let sql = filter_sort.build_count_sql(&schema, &table);
                 match sess.execute_sql(&sql, 1) {
                     Ok(QueryOutcome::Rows(page)) => {
@@ -377,12 +398,23 @@ fn slot_worker_loop(
                             .unwrap_or(0);
                         emit(&tx, &ctx, WorkerEvent::RowCountLoaded { tab_id, total_rows: count });
                     }
-                    Ok(_) => {}
+                    Ok(_) => emit(
+                        &tx,
+                        &ctx,
+                        WorkerEvent::Error {
+                            slot,
+                            tab_id: Some(tab_id),
+                            error: MySqlError::message("Row count query returned no rows"),
+                        },
+                    ),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
                 }
             }
             SlotCmd::SubmitMutations { tab_id, statements } => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, Some(tab_id));
+                    continue;
+                };
                 let count = statements.len();
                 match sess.execute_atomic_batch(&statements) {
                     Ok(elapsed_ms) => emit(
@@ -399,14 +431,20 @@ fn slot_worker_loop(
                 }
             }
             SlotCmd::ExplainQuery { tab_id, sql, analyze } => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, Some(tab_id));
+                    continue;
+                };
                 match sess.explain(&sql, analyze) {
                     Ok(result) => emit(&tx, &ctx, WorkerEvent::ExplainFinished { tab_id, result }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
                 }
             }
             SlotCmd::SetSchema(schema) => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.set_schema(&schema) {
                     Ok(()) => {
                         let _ = catalog.introspect_schema_l1(sess, &schema);
@@ -419,42 +457,60 @@ fn slot_worker_loop(
                 }
             }
             SlotCmd::SetAutocommit(enabled) => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.set_autocommit(enabled) {
                     Ok(()) => emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime: sess.runtime().clone() }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
             SlotCmd::BeginTx => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.begin_transaction() {
                     Ok(()) => emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime: sess.runtime().clone() }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
             SlotCmd::CommitTx => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.commit() {
                     Ok(()) => emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime: sess.runtime().clone() }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
             SlotCmd::RollbackTx => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.rollback() {
                     Ok(()) => emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime: sess.runtime().clone() }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
             SlotCmd::FetchProcesslist => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.fetch_processlist() {
                     Ok(entries) => emit(&tx, &ctx, WorkerEvent::ProcesslistLoaded { slot, entries }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
             SlotCmd::KillProcess(pid) => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 let sql = format!("KILL QUERY {pid}");
                 match sess.execute_sql(&sql, 1) {
                     Ok(_) => {
@@ -466,7 +522,10 @@ fn slot_worker_loop(
                 }
             }
             SlotCmd::FetchHealth => {
-                let Some(sess) = session.as_mut() else { continue };
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, None);
+                    continue;
+                };
                 match sess.fetch_health_metrics() {
                     Ok(metrics) => emit(&tx, &ctx, WorkerEvent::HealthLoaded { slot, metrics }),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),

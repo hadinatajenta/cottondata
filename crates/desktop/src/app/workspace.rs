@@ -2,7 +2,6 @@ use super::query_tab::BottomDeckTab;
 use super::CottonDataApp;
 use crate::theme::{Palette, GUTTER, RADIUS_CARD};
 use crate::ui_kit::{banner, caption, card_frame, document_tab, icon, icon_button, icon_text, underline_tab};
-use crate::worker::SlotCmd;
 use eframe::egui::{self, CornerRadius, Margin, Shape, Stroke};
 
 const RESULT_TABS: [(BottomDeckTab, &str, &str); 5] = [
@@ -163,8 +162,7 @@ impl CottonDataApp {
             return;
         }
         if let Some(slot) = self.active_slot {
-            self.hub.send(slot, SlotCmd::FetchProcesslist);
-            self.hub.send(slot, SlotCmd::FetchHealth);
+            self.request_monitor_refresh(slot);
         }
     }
 

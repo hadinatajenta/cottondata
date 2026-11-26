@@ -1,13 +1,22 @@
 use super::{truncate_display, CottonDataApp};
 use crate::theme::{highlight_mysql_layout, Palette};
 use crate::ui_kit::{
-    banner, caption, empty_state, ghost_button, icon, icon_text, inset_frame, pill, tinted_ghost_button,
+    banner, busy_indicator, caption, empty_state, ghost_button, icon, icon_text, inset_frame, loading_state, pill,
+    tinted_ghost_button,
 };
 use crate::worker::SlotCmd;
+use cottondata_core::ServerSlotId;
 use eframe::egui::{self, FontFamily, FontId, RichText};
 
 impl CottonDataApp {
     pub(super) fn render_ddl_view(&self, ui: &mut egui::Ui, p: Palette) {
+        let pending_detail = self
+            .active_slot
+            .and_then(|slot| self.slot_activity[slot.index()].loading_table_detail.as_ref());
+        if let Some((schema, table)) = pending_detail {
+            loading_state(ui, p, &format!("Loading DDL for {schema}.{table}…"));
+            return;
+        }
         let Some((schema, table, detail)) = &self.ddl_view else {
             empty_state(
                 ui,
@@ -100,7 +109,12 @@ impl CottonDataApp {
     }
 
     pub(super) fn render_explain_view(&self, ui: &mut egui::Ui, p: Palette) {
-        let Some(exp) = &self.tabs[self.active_tab_idx].explain else {
+        let active_tab = &self.tabs[self.active_tab_idx];
+        if active_tab.is_running {
+            loading_state(ui, p, "Waiting for the server to finish…");
+            return;
+        }
+        let Some(exp) = &active_tab.explain else {
             empty_state(
                 ui,
                 p,
@@ -141,6 +155,16 @@ impl CottonDataApp {
         });
     }
 
+    pub(super) fn request_monitor_refresh(&mut self, slot: ServerSlotId) {
+        let activity = &mut self.slot_activity[slot.index()];
+        if activity.is_refreshing_monitor {
+            return;
+        }
+        activity.is_refreshing_monitor = true;
+        self.hub.send(slot, SlotCmd::FetchProcesslist);
+        self.hub.send(slot, SlotCmd::FetchHealth);
+    }
+
     pub(super) fn render_monitor_view(&mut self, ui: &mut egui::Ui, p: Palette) {
         let Some(slot) = self.active_slot else {
             empty_state(
@@ -152,9 +176,12 @@ impl CottonDataApp {
             return;
         };
         ui.horizontal(|ui| {
-            if ghost_button(ui, p, icon::ARROW_CLOCKWISE, "Refresh", true).clicked() {
-                self.hub.send(slot, SlotCmd::FetchProcesslist);
-                self.hub.send(slot, SlotCmd::FetchHealth);
+            let is_refreshing = self.slot_activity[slot.index()].is_refreshing_monitor;
+            if ghost_button(ui, p, icon::ARROW_CLOCKWISE, "Refresh", !is_refreshing).clicked() {
+                self.request_monitor_refresh(slot);
+            }
+            if is_refreshing {
+                busy_indicator(ui, p, "Refreshing…");
             }
             if let Some(m) = &self.health[slot.index()] {
                 let hit = m
