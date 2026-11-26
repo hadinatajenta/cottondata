@@ -12,8 +12,8 @@ pub struct SshTunnel {
 impl SshTunnel {
     pub fn open(
         cfg: &SshTunnelConfig,
-        remote_mysql_host: &str,
-        remote_mysql_port: u16,
+        remote_host: &str,
+        remote_port: u16,
         timeout: Duration,
     ) -> Result<Self, String> {
         let local_port = match cfg.local_bind_port {
@@ -37,7 +37,7 @@ impl SshTunnel {
             .arg(cfg.port.max(1).to_string())
             .arg("-L")
             .arg(format!(
-                "127.0.0.1:{local_port}:{remote_mysql_host}:{remote_mysql_port}"
+                "127.0.0.1:{local_port}:{remote_host}:{remote_port}"
             ));
 
         if let Some(key) = cfg.identity_file.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -79,7 +79,7 @@ impl SshTunnel {
         let _ = child.kill();
         let _ = child.wait();
         Err(format!(
-            "Timed out waiting for SSH tunnel 127.0.0.1:{local_port} -> {remote_mysql_host}:{remote_mysql_port}"
+            "Timed out waiting for SSH tunnel 127.0.0.1:{local_port} -> {remote_host}:{remote_port}"
         ))
     }
 

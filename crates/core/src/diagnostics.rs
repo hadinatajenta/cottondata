@@ -6,16 +6,27 @@ pub enum DiagnosticSeverity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MySqlDiagnostic {
-    pub code: Option<u16>,
+pub struct DbDiagnostic {
+    pub code: Option<u32>,
     pub severity: DiagnosticSeverity,
     pub summary: String,
     pub hint: Option<String>,
     pub raw_message: String,
 }
 
-impl MySqlDiagnostic {
-    pub fn classify(raw: impl Into<String>, code: Option<u16>) -> Self {
+impl DbDiagnostic {
+    pub fn plain(raw: impl Into<String>, code: Option<u32>) -> Self {
+        let raw_message = raw.into();
+        Self {
+            code,
+            severity: DiagnosticSeverity::Error,
+            summary: raw_message.clone(),
+            hint: None,
+            raw_message,
+        }
+    }
+
+    pub fn classify(raw: impl Into<String>, code: Option<u32>) -> Self {
         let raw_message = raw.into();
         let lower = raw_message.to_ascii_lowercase();
 
@@ -35,6 +46,21 @@ impl MySqlDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 summary: "Authentication failed (Access Denied)".into(),
                 hint: Some("Verify username, password, allowed client host, and MySQL auth plugin (caching_sha2_password).".into()),
+                raw_message,
+            };
+        }
+
+        if lower.contains("server does not have this capability")
+            || lower.contains("requires secure connection")
+        {
+            return Self {
+                code,
+                severity: DiagnosticSeverity::Warning,
+                summary: "MySQL server does not support TLS/SSL".into(),
+                hint: Some(
+                    "This MySQL server has SSL disabled. Switch TLS Mode to 'Disabled' or 'Preferred'."
+                        .into(),
+                ),
                 raw_message,
             };
         }
@@ -95,11 +121,17 @@ mod tests {
 
     #[test]
     fn classifies_expired_password_and_tls_errors() {
-        let exp = MySqlDiagnostic::classify("You must reset your password using ALTER USER", Some(1820));
+        let exp = DbDiagnostic::classify("You must reset your password using ALTER USER", Some(1820));
         assert_eq!(exp.code, Some(1820));
         assert!(exp.hint.unwrap().contains("ALTER USER"));
 
-        let tls = MySqlDiagnostic::classify("Remote host terminated the SSL handshake", None);
+        let tls = DbDiagnostic::classify("Remote host terminated the SSL handshake", None);
         assert!(tls.summary.contains("TLS"));
+
+        let no_tls = DbDiagnostic::classify(
+            "DriverError { Client requires secure connection but server does not have this capability }",
+            None,
+        );
+        assert!(no_tls.summary.contains("does not support TLS/SSL"));
     }
 }

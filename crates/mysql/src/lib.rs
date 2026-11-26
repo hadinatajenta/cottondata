@@ -1,7 +1,5 @@
 pub mod client;
-pub mod tunnel;
+pub mod introspection;
 
-pub use client::{
-    ExplainResult, MySqlError, MySqlSession, ProcessEntry, QueryOutcome, ServerHealthMetrics,
-};
-pub use tunnel::SshTunnel;
+pub use client::MySqlSession;
+pub use introspection::is_system_schema;

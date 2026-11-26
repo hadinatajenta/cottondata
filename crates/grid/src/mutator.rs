@@ -1,4 +1,5 @@
-use crate::page::{escape_ident, CellValue, ColumnarPage};
+use crate::page::{CellValue, ColumnarPage};
+use cottondata_core::SqlDialect;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,12 +142,13 @@ impl StagedMutator {
 
     pub fn build_pending_sql(
         &self,
+        dialect: SqlDialect,
         page: &ColumnarPage,
         schema: &str,
         table: &str,
         primary_key_cols: &[String],
     ) -> Result<PendingSqlBatch, String> {
-        let fq_table = format!("`{}`.`{}`", escape_ident(schema), escape_ident(table));
+        let fq_table = dialect.qualified_table(schema, table);
         let pk_indices: Vec<usize> = primary_key_cols
             .iter()
             .filter_map(|pk| page.columns.iter().position(|c| c.name.eq_ignore_ascii_case(pk)))
@@ -162,8 +164,8 @@ impl StagedMutator {
         let mut insert_count = 0;
 
         for &row in &self.deleted_rows {
-            let where_clause = build_pk_predicate(page, row, &pk_indices)?;
-            statements.push(format!("DELETE FROM {fq_table} WHERE {where_clause} LIMIT 1"));
+            let where_clause = build_pk_predicate(dialect, page, row, &pk_indices)?;
+            statements.push(dialect.delete_single_row(&fq_table, &where_clause));
             delete_count += 1;
         }
 
@@ -180,17 +182,15 @@ impl StagedMutator {
                 .map(|(col, val)| {
                     let meta = &page.columns[*col];
                     format!(
-                        "`{}` = {}",
-                        escape_ident(&meta.name),
-                        format_sql_literal(val, meta.is_numeric)
+                        "{} = {}",
+                        dialect.quote_ident(&meta.name),
+                        format_sql_literal(dialect, val, meta.is_numeric)
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let where_clause = build_pk_predicate(page, row, &pk_indices)?;
-            statements.push(format!(
-                "UPDATE {fq_table} SET {set_clause} WHERE {where_clause} LIMIT 1"
-            ));
+            let where_clause = build_pk_predicate(dialect, page, row, &pk_indices)?;
+            statements.push(dialect.update_single_row(&fq_table, &set_clause, &where_clause));
             update_count += 1;
         }
 
@@ -202,11 +202,11 @@ impl StagedMutator {
                 if meta.is_auto_increment && val.is_null() {
                     continue;
                 }
-                cols.push(format!("`{}`", escape_ident(&meta.name)));
-                vals.push(format_sql_literal(val, meta.is_numeric));
+                cols.push(dialect.quote_ident(&meta.name));
+                vals.push(format_sql_literal(dialect, val, meta.is_numeric));
             }
             if cols.is_empty() {
-                statements.push(format!("INSERT INTO {fq_table} () VALUES ()"));
+                statements.push(dialect.insert_default_values(&fq_table));
             } else {
                 statements.push(format!(
                     "INSERT INTO {fq_table} ({}) VALUES ({})",
@@ -226,33 +226,37 @@ impl StagedMutator {
     }
 }
 
-fn build_pk_predicate(page: &ColumnarPage, row: usize, pk_indices: &[usize]) -> Result<String, String> {
+fn build_pk_predicate(
+    dialect: SqlDialect,
+    page: &ColumnarPage,
+    row: usize,
+    pk_indices: &[usize],
+) -> Result<String, String> {
     let mut parts = Vec::with_capacity(pk_indices.len());
     for &idx in pk_indices {
         let meta = &page.columns[idx];
         let val = page.cell_value(row, idx);
         if val.is_null() {
-            parts.push(format!("`{}` IS NULL", escape_ident(&meta.name)));
+            parts.push(format!("{} IS NULL", dialect.quote_ident(&meta.name)));
         } else {
             parts.push(format!(
-                "`{}` = {}",
-                escape_ident(&meta.name),
-                format_sql_literal(&val, meta.is_numeric)
+                "{} = {}",
+                dialect.quote_ident(&meta.name),
+                format_sql_literal(dialect, &val, meta.is_numeric)
             ));
         }
     }
     Ok(parts.join(" AND "))
 }
 
-pub fn format_sql_literal(val: &CellValue, is_numeric: bool) -> String {
+pub fn format_sql_literal(dialect: SqlDialect, val: &CellValue, is_numeric: bool) -> String {
     match val {
         CellValue::Null => "NULL".to_string(),
         CellValue::Text(s) | CellValue::Truncated { preview: s, .. } => {
             if is_numeric && is_plain_number(s) {
                 s.clone()
             } else {
-                let escaped = s.replace('\\', "\\\\").replace('\'', "''");
-                format!("'{escaped}'")
+                dialect.string_literal(s)
             }
         }
     }
@@ -319,7 +323,7 @@ mod tests {
         mutator.set_inserted_cell(ins, 1, CellValue::Text("Charlie".into()));
 
         let batch = mutator
-            .build_pending_sql(&page, "shop", "users", &["id".into()])
+            .build_pending_sql(SqlDialect::MySql, &page, "shop", "users", &["id".into()])
             .unwrap();
         assert_eq!(batch.delete_count, 1);
         assert_eq!(batch.update_count, 1);
@@ -333,5 +337,46 @@ mod tests {
             batch.statements[2],
             "INSERT INTO `shop`.`users` (`name`) VALUES ('Charlie')"
         );
+    }
+
+    #[test]
+    fn sql_server_batch_uses_brackets_top_and_unicode_literals_without_backslash_escaping() {
+        let cols = vec![
+            ColumnMeta {
+                name: "id".into(),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "int".into(),
+                is_primary_key: true,
+                is_nullable: false,
+                is_auto_increment: true,
+                is_numeric: true,
+            },
+            ColumnMeta {
+                name: "path".into(),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "nvarchar(100)".into(),
+                is_primary_key: false,
+                is_nullable: true,
+                is_auto_increment: false,
+                is_numeric: false,
+            },
+        ];
+        let mut page = ColumnarPage::new(cols, "SELECT 1".into());
+        page.push_row(&[CellValue::Text("7".into()), CellValue::Text("old".into())]);
+
+        let mut mutator = StagedMutator::new();
+        mutator.set_cell(&page, 0, 1, CellValue::Text("C:\\temp\\it's".into()));
+        mutator.insert_blank_row(&page);
+
+        let batch = mutator
+            .build_pending_sql(SqlDialect::SqlServer, &page, "shop", "users", &["id".into()])
+            .unwrap();
+        assert_eq!(
+            batch.statements[0],
+            "UPDATE TOP (1) [shop].[dbo].[users] SET [path] = N'C:\\temp\\it''s' WHERE [id] = 7"
+        );
+        assert_eq!(batch.statements[1], "INSERT INTO [shop].[dbo].[users] ([path]) VALUES (NULL)");
     }
 }

@@ -1,10 +1,11 @@
 use cottondata_core::{
     ConnectionEndpoint, EnvironmentTag, ServerProfile, TlsMode, DEFAULT_GRID_BUDGET_BYTES,
-    MAX_SERVERS, MAX_SOCKETS_PER_SERVER,
+    MAX_SOCKETS_PER_SERVER,
 };
 use cottondata_grid::{export_csv, export_json_array, export_json_lines, export_sql_inserts};
 use cottondata_introspect::SchemaCatalog;
-use cottondata_mysql::{MySqlSession, QueryOutcome};
+use cottondata_driver::{DatabaseSession, QueryOutcome};
+use cottondata_mysql::MySqlSession;
 use cottondata_storage::AppStorage;
 use mimalloc::MiMalloc;
 use std::env;
@@ -35,8 +36,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "doctor" => {
             println!("CottonData CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("Engine:       MySQL-only (pure Rust + rustls)");
-            println!("Server Cap:   {} / {} slots configured", registry.count(), MAX_SERVERS);
-            println!("Socket Cap:   max {} sockets per server", MAX_SOCKETS_PER_SERVER);
+            println!("Server Cap:   {} / {} slots configured", registry.count(), registry.max_servers());
+            println!("Socket Cap:   max {MAX_SOCKETS_PER_SERVER} sockets per server");
             println!("Grid Budget:  {} MiB LRU ceiling", DEFAULT_GRID_BUDGET_BYTES / (1024 * 1024));
             println!("Allocator:    mimalloc");
             println!("Data Dir:     {}", storage.data_dir().display());
@@ -47,10 +48,10 @@ fn run(args: &[String]) -> Result<(), String> {
             match sub {
                 "list" => {
                     if registry.count() == 0 {
-                        println!("No MySQL servers configured (0/{MAX_SERVERS} slots).");
+                        println!("No MySQL servers configured (0/{} slots).", registry.max_servers());
                         return Ok(());
                     }
-                    println!("Configured MySQL servers ({}/{MAX_SERVERS}):", registry.count());
+                    println!("Configured MySQL servers ({}/{}):", registry.count(), registry.max_servers());
                     for slot in registry.iter() {
                         let ro = if slot.profile.read_only { " [RO]" } else { "" };
                         let ssh = if slot.profile.ssh.enabled { " [SSH]" } else { "" };
@@ -89,7 +90,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     }
                     let slot_id = registry.add(profile).map_err(|e| e.to_string())?;
                     storage.save_registry(&registry).map_err(|e| e.to_string())?;
-                    println!("Added MySQL server in slot {slot_id} ({}/{MAX_SERVERS} used).", registry.count());
+                    println!("Added MySQL server in slot {slot_id} ({}/{} used).", registry.count(), registry.max_servers());
                     Ok(())
                 }
                 "remove" => {
@@ -198,7 +199,7 @@ fn find_slot(
     query: &str,
 ) -> Result<cottondata_core::ServerSlotId, String> {
     if let Ok(num) = query.trim_start_matches('#').parse::<usize>() {
-        if (1..=MAX_SERVERS).contains(&num) {
+        if (1..=cottondata_core::SERVER_SLOT_CAPACITY).contains(&num) {
             let id = cottondata_core::ServerSlotId::new(num - 1).unwrap();
             if registry.get(id).is_some() {
                 return Ok(id);
@@ -229,7 +230,7 @@ fn resolve_password(storage: &mut AppStorage, profile_id: &str) -> Option<String
 
 fn print_usage() {
     println!(
-        "CottonData CLI — Featherweight MySQL-only client (max {MAX_SERVERS} servers)\n\n\
+        "CottonData CLI - Featherweight MySQL client (up to {} servers)\n\n\
          USAGE:\n  \
            cottondata-cli doctor\n  \
            cottondata-cli servers list\n  \
@@ -238,7 +239,8 @@ fn print_usage() {
            cottondata-cli test <server>\n  \
            cottondata-cli schemas <server>\n  \
            cottondata-cli query <server> <sql> [--limit 500] [--format csv|jsonl|json|sql]\n\n\
-         Tip: Pass password via macOS Keychain (saved in GUI) or COTTONDATA_PASSWORD env var."
+         Tip: Pass password via macOS Keychain (saved in GUI) or COTTONDATA_PASSWORD env var.",
+        cottondata_core::SERVER_SLOT_CAPACITY
     );
 }
 

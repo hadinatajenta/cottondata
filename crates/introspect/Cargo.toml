@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 cottondata-core.workspace = true
-cottondata-mysql.workspace = true
+cottondata-driver.workspace = true
 cottondata-sql.workspace = true
 lasso.workspace = true
-mysql.workspace = true

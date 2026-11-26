@@ -1,4 +1,4 @@
-use cottondata_core::MAX_INLINE_CELL_BYTES;
+use cottondata_core::{SqlDialect, MAX_INLINE_CELL_BYTES};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -83,48 +83,31 @@ impl PageFilterSort {
         self.page_index.saturating_mul(self.page_size.max(1) as u64)
     }
 
-    pub fn build_select_sql(&self, schema: &str, table: &str) -> String {
-        let mut sql = format!(
-            "SELECT * FROM `{}`.`{}`",
-            escape_ident(schema),
-            escape_ident(table)
-        );
-        let where_trimmed = self.where_clause.trim();
-        if !where_trimmed.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(where_trimmed);
-        }
-        if let Some((col, dir)) = &self.order_by {
-            sql.push_str(" ORDER BY `");
-            sql.push_str(&escape_ident(col));
-            sql.push('`');
-            sql.push_str(match dir {
-                SortDirection::Asc => " ASC",
-                SortDirection::Desc => " DESC",
-            });
-        }
-        let fetch_limit = self.page_size.max(1) as u64 + 1;
-        sql.push_str(&format!(" LIMIT {fetch_limit} OFFSET {}", self.offset()));
-        sql
+    pub fn build_select_sql(&self, dialect: SqlDialect, schema: &str, table: &str) -> String {
+        let order_by = self.order_by.as_ref().map(|(column, direction)| {
+            let direction_sql = match direction {
+                SortDirection::Asc => "ASC",
+                SortDirection::Desc => "DESC",
+            };
+            format!("{} {direction_sql}", dialect.quote_ident(column))
+        });
+        let fetch_limit = self.page_size.max(1).saturating_add(1);
+        dialect.paged_select(
+            &dialect.qualified_table(schema, table),
+            self.where_filter(),
+            order_by.as_deref(),
+            fetch_limit,
+            self.offset(),
+        )
     }
 
-    pub fn build_count_sql(&self, schema: &str, table: &str) -> String {
-        let mut sql = format!(
-            "SELECT COUNT(*) FROM `{}`.`{}`",
-            escape_ident(schema),
-            escape_ident(table)
-        );
-        let where_trimmed = self.where_clause.trim();
-        if !where_trimmed.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(where_trimmed);
-        }
-        sql
+    pub fn build_count_sql(&self, dialect: SqlDialect, schema: &str, table: &str) -> String {
+        dialect.count_rows(&dialect.qualified_table(schema, table), self.where_filter())
     }
-}
 
-pub fn escape_ident(ident: &str) -> String {
-    ident.replace('`', "``")
+    fn where_filter(&self) -> Option<&str> {
+        Some(self.where_clause.trim()).filter(|clause| !clause.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
