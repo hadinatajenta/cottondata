@@ -22,6 +22,13 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1360.0, 860.0])
         .with_min_inner_size([920.0, 600.0]);
 
+    if cfg!(target_os = "macos") {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
+
     if ICON_64_RGBA.len() == 64 * 64 * 4 {
         viewport = viewport.with_icon(egui::IconData {
             rgba: ICON_64_RGBA.to_vec(),

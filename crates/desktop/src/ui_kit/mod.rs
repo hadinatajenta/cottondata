@@ -15,10 +15,17 @@ pub use form::*;
 pub use modal::*;
 pub use tabs::{document_tab, underline_tab};
 
+const CARD_SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
+    offset: [0, 1],
+    blur: 4,
+    spread: 0,
+    color: Color32::from_black_alpha(18),
+};
+
 pub fn card_frame(palette: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(palette.bg_card)
-        .stroke(Stroke::new(1.0, palette.border))
+        .shadow(CARD_SHADOW)
         .corner_radius(CornerRadius::same(RADIUS_CARD))
         .inner_margin(Margin::same(10))
 }
@@ -26,7 +33,7 @@ pub fn card_frame(palette: Palette) -> egui::Frame {
 pub fn inset_frame(palette: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(palette.bg_surface)
-        .stroke(Stroke::new(1.0, palette.border))
+        .stroke(Stroke::new(1.0, palette.divider))
         .corner_radius(CornerRadius::same(RADIUS_CONTROL))
         .inner_margin(Margin::same(8))
 }
@@ -71,12 +78,17 @@ fn with_ghost_visuals<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -
 }
 
 pub fn ghost_button(ui: &mut Ui, palette: Palette, glyph: &str, label: &str, is_enabled: bool) -> Response {
-    let text = icon_text(glyph, palette.accent, label, palette.text_primary, 13.0);
+    let text = icon_text(glyph, palette.text_muted, label, palette.text_primary, 13.0);
     with_ghost_visuals(ui, |ui| ui.add_enabled(is_enabled, egui::Button::new(text)))
 }
 
 pub fn tinted_ghost_button(ui: &mut Ui, tint: Color32, glyph: &str, label: &str, is_enabled: bool) -> Response {
-    let text = icon_text(glyph, tint, label, tint, 13.0);
+    let tone = if is_enabled {
+        tint
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let text = icon_text(glyph, tone, label, tone, 13.0);
     with_ghost_visuals(ui, |ui| ui.add_enabled(is_enabled, egui::Button::new(text)))
 }
 

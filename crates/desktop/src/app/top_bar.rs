@@ -48,15 +48,19 @@ impl TopBarLayout {
 
 impl CottonDataApp {
     pub(super) fn render_top_bar(&mut self, ctx: &egui::Context, palette: Palette) {
+        let titlebar_height = window_titlebar_height(ctx);
         egui::TopBottomPanel::top("toolbar")
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(palette.bg_backdrop).inner_margin(Margin {
                 left: GUTTER,
                 right: GUTTER,
-                top: GUTTER,
+                top: if titlebar_height > 0.0 { 0 } else { GUTTER },
                 bottom: 0,
             }))
             .show(ctx, |ui| {
+                if titlebar_height > 0.0 {
+                    render_titlebar_drag_region(ui, titlebar_height);
+                }
                 card_frame(palette)
                     .inner_margin(Margin::symmetric(10, 6))
                     .show(ui, |ui| {
@@ -280,5 +284,28 @@ impl CottonDataApp {
         if slot.runtime.is_none() {
             ui.label(RichText::new("offline").size(11.5).color(palette.text_muted));
         }
+    }
+}
+
+const MACOS_TITLEBAR_HEIGHT: f32 = 28.0;
+
+fn window_titlebar_height(ctx: &egui::Context) -> f32 {
+    let is_fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+    if cfg!(target_os = "macos") && !is_fullscreen {
+        MACOS_TITLEBAR_HEIGHT
+    } else {
+        0.0
+    }
+}
+
+fn render_titlebar_drag_region(ui: &mut egui::Ui, height: f32) {
+    let (_, drag_response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click_and_drag());
+    if drag_response.double_clicked() {
+        let is_maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+    } else if drag_response.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 }

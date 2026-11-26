@@ -223,10 +223,34 @@ fn apply_spacing_and_typography(style: &mut egui::Style) {
     .into();
 }
 
+const UI_FONT_NAME: &str = "inter";
+const UI_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+const CODE_FONT_NAME: &str = "jetbrains_mono";
+const CODE_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    register_primary_font(&mut fonts, FontFamily::Proportional, UI_FONT_NAME, UI_FONT_BYTES);
+    register_primary_font(&mut fonts, FontFamily::Monospace, CODE_FONT_NAME, CODE_FONT_BYTES);
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
+}
+
+fn register_primary_font(
+    fonts: &mut egui::FontDefinitions,
+    family: FontFamily,
+    font_name: &str,
+    font_bytes: &'static [u8],
+) {
+    fonts.font_data.insert(
+        font_name.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(font_bytes)),
+    );
+    fonts
+        .families
+        .entry(family)
+        .or_default()
+        .insert(0, font_name.to_owned());
 }
 
 pub fn highlight_mysql_layout(
