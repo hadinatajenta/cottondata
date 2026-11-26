@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="CottonData"
-VERSION="${VERSION:-0.1.0}"
+WORKSPACE_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1)"
+VERSION="${VERSION:-$WORKSPACE_VERSION}"
 ARCH_LABEL="${ARCH_LABEL:-x64}"
 DEB_ARCH="${DEB_ARCH:-amd64}"
 

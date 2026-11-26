@@ -5,7 +5,7 @@
 <h1 align="center">CottonData</h1>
 
 <p align="center">
-  <strong>Featherweight Native Rust MySQL Client — Up to 10 MySQL Servers, Zero JVM Bloat.</strong>
+  <strong>Featherweight Native Rust Client for MySQL and SQL Server. Up to 64 Servers, Zero JVM Bloat.</strong>
 </p>
 
 ---
@@ -14,12 +14,12 @@
 
 Traditional JVM database IDEs (such as DataGrip) ship multi-gigabyte bundles with embedded Chromium, dozens of unused DBMS dialects, ML completion runtimes, and out-of-process RMI JDBC JVMs — routinely consuming **1.5–3.5 GB of RAM** when working across multiple servers.
 
-**CottonData** is a clean-room native Rust rewrite built specifically for one job: **fast, low-RAM MySQL engineering across at most 10 MySQL servers**.
+**CottonData** is a clean-room native Rust rewrite built specifically for one job: **fast, low-RAM database engineering across MySQL and SQL Server, with a server limit you choose (1 to 64, default 10)**.
 
 | Dimension | CottonData (Rust) | Typical JVM DB IDE |
 |---|---|---|
-| Supported Engine | **MySQL only** (5.7 / 8.0 / 8.4 / 9.x) | 30+ dialects & drivers |
-| Server Slot Cap | **Hard cap: 10 MySQL servers** (`Cmd/Ctrl+1..0`) | Unbounded heap & pools |
+| Supported Engines | **MySQL** (5.7 / 8.0 / 8.4 / 9.x) and **SQL Server** (2012+, SQL login) | 30+ dialects & drivers |
+| Server Slot Cap | **User setting: 1 to 64 servers, default 10** (`Cmd/Ctrl+1..0` for the first ten) | Unbounded heap & pools |
 | Runtime | Single native binary + `mimalloc` + `rustls` | JVM + JCEF Chromium + Remote JDBC JVM |
 | Disk Footprint | **~10–15 MB** binary | ~2.4 GB bundle |
 | RAM Guardrail | **32 MiB global LRU grid budget** + 4 KiB inline cell cap | 1.5–3.5+ GB RSS |
