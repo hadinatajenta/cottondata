@@ -40,7 +40,8 @@ latest_release_page: https://github.com/hadinatajenta/cottondata/releases/latest
 prebuilt_assets:
   macos_arm64_zip: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-arm64.zip
   macos_arm64_dmg: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-arm64.dmg
-prebuilt_platforms: [macos-arm64]
+  windows_x64_zip: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-windows-x64.zip
+prebuilt_platforms: [macos-arm64, windows-x86_64]
 build_from_source_platforms: [macos-x86_64, linux-x86_64, linux-aarch64, windows-x86_64]
 minimum_rust: "1.88"
 gui_binary: CottonData            # CottonData.exe on Windows
@@ -52,8 +53,8 @@ display_required_for_gui: true
 
 Rules that keep installs fast and correct:
 
-1. Use the prebuilt release on macOS Apple Silicon. Building there takes several minutes for no benefit.
-2. On every other platform, install the listed system packages **before** running `cargo`, otherwise the build stops halfway through.
+1. Use the prebuilt release on macOS Apple Silicon and Windows x86_64. Building there takes several minutes for no benefit.
+2. When building from source, install the listed system packages **before** running `cargo`, otherwise the build stops halfway through.
 3. Run commands from the repository root. The bundle scripts locate files relative to themselves.
 4. The GUI needs a desktop session. On a headless machine, install and verify with `cottondata-cli` only.
 5. Do not create database servers or users to "test" the install. `cottondata-cli doctor` needs no server.
@@ -214,7 +215,7 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 - **Table Structure Editor, Schema Compare & ER Diagram**: edit table columns, indexes, and foreign keys with live `ALTER TABLE` SQL preview; compare two schemas across servers (e.g., DEV vs STAGING) to inspect DDL diffs and generate migration scripts; explore interactive pan/zoom **ER Diagrams** per schema.
 - **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
 - **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, on focus loss, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
-- **Memory Guardrail**: all result grids share a 32 MiB budget with least-recently-used eviction.
+- **Memory Guardrail**: all result grids share a 16 MiB budget with least-recently-used eviction. The most recently used result is always kept, and an evicted tab must be run or reloaded to fetch its rows again.
 
 ### Keyboard shortcuts
 
