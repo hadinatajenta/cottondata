@@ -3,13 +3,14 @@ use crate::connection::{load_runtime_info, open_client};
 use crate::errors::mssql_error;
 use crate::introspection;
 use crate::monitoring;
-use crate::results::read_first_result_set;
+use crate::results::{read_first_result_set, stream_first_result_set};
 use crate::rows::{int, optional_text, MssqlClient};
 use cottondata_core::{ServerProfile, ServerRuntimeInfo, SqlDialect};
 use cottondata_driver::{
     DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, SchemaObjects, SchemaSummary,
     ServerHealthMetrics, SshTunnel, TableDetail,
 };
+use cottondata_grid::ColumnMeta;
 use cottondata_sql::{analyze_statement, WriteClass};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -167,6 +168,23 @@ impl DatabaseSession for MssqlSession {
                 executed_sql: sql.to_string(),
             },
         })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn stream_query(
+        &mut self,
+        sql: &str,
+        on_columns: &mut dyn FnMut(&[ColumnMeta]) -> Result<(), String>,
+        on_row: &mut dyn FnMut(&[Option<String>]) -> Result<bool, String>,
+    ) -> Result<u64, DbError> {
+        self.ensure_writable(sql)?;
+        let Self { executor, client, .. } = self;
+        let (rows, completed_stream) =
+            executor.block_on(stream_first_result_set(client, sql, on_columns, on_row))?;
+        if completed_stream {
+            self.refresh_session_state();
+        }
+        Ok(rows)
     }
 
     fn execute_atomic_batch(&mut self, statements: &[String]) -> Result<u64, DbError> {

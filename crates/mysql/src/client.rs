@@ -84,6 +84,16 @@ impl MySqlSession {
             }
         }
     }
+
+    fn ensure_writable(&self, sql: &str) -> Result<(), DbError> {
+        let safety = analyze_statement(sql);
+        if self.read_only && !safety.allowed_in_read_only() {
+            return Err(DbError::message(
+                "Blocked by server Read-Only protection. Disable Read-Only on this server slot to execute writes.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl DatabaseSession for MySqlSession {
@@ -150,12 +160,7 @@ impl DatabaseSession for MySqlSession {
     }
 
     fn execute_sql(&mut self, sql: &str, max_rows: u32) -> Result<QueryOutcome, DbError> {
-        let safety = analyze_statement(sql);
-        if self.read_only && !safety.allowed_in_read_only() {
-            return Err(DbError::message(
-                "Blocked by server Read-Only protection. Disable Read-Only on this server slot to execute writes.",
-            ));
-        }
+        self.ensure_writable(sql)?;
 
         let start = Instant::now();
         let mut result = self.conn.query_iter(sql).map_err(mysql_error)?;
@@ -177,40 +182,7 @@ impl DatabaseSession for MySqlSession {
             });
         }
 
-        let columns: Vec<ColumnMeta> = cols_slice
-            .iter()
-            .map(|c| {
-                let flags = c.flags();
-                let col_type = c.column_type();
-                ColumnMeta {
-                    name: c.name_str().into_owned(),
-                    org_name: {
-                        let o = c.org_name_str();
-                        if o.is_empty() { None } else { Some(o.into_owned()) }
-                    },
-                    table: {
-                        let t = c.org_table_str();
-                        if t.is_empty() { None } else { Some(t.into_owned()) }
-                    },
-                    schema: {
-                        let s = c.schema_str();
-                        if s.is_empty() { None } else { Some(s.into_owned()) }
-                    },
-                    type_name: mysql_type_label(col_type, flags),
-                    is_primary_key: flags.contains(ColumnFlags::PRI_KEY_FLAG),
-                    is_unique_key: flags.contains(ColumnFlags::UNIQUE_KEY_FLAG),
-                    is_nullable: !flags.contains(ColumnFlags::NOT_NULL_FLAG),
-                    is_auto_increment: flags.contains(ColumnFlags::AUTO_INCREMENT_FLAG),
-                    is_numeric: is_numeric_mysql_type(col_type),
-                    is_binary: flags.contains(ColumnFlags::BINARY_FLAG),
-                }
-            })
-            .collect();
-
-        let col_types: Vec<(ColumnType, ColumnFlags)> = cols_slice
-            .iter()
-            .map(|c| (c.column_type(), c.flags()))
-            .collect();
+        let (columns, col_types) = extract_mysql_columns(cols_slice);
 
         let mut page = ColumnarPage::new(columns, sql.to_string());
         let cap = max_rows.max(1) as usize;
@@ -234,6 +206,42 @@ impl DatabaseSession for MySqlSession {
         page.elapsed_ms = start.elapsed().as_millis() as u64;
         self.sync_tx_state_after_stmt(sql);
         Ok(QueryOutcome::Rows(page))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn stream_query(
+        &mut self,
+        sql: &str,
+        on_columns: &mut dyn FnMut(&[ColumnMeta]) -> Result<(), String>,
+        on_row: &mut dyn FnMut(&[Option<String>]) -> Result<bool, String>,
+    ) -> Result<u64, DbError> {
+        self.ensure_writable(sql)?;
+
+        let mut result = self.conn.query_iter(sql).map_err(mysql_error)?;
+        let (columns, col_types) = extract_mysql_columns(result.columns().as_ref());
+        on_columns(&columns).map_err(DbError::message)?;
+
+        let mut row_buf: Vec<Option<String>> = Vec::with_capacity(col_types.len());
+        let mut rows_streamed: u64 = 0;
+
+        for row_res in result.by_ref() {
+            let row = row_res.map_err(mysql_error)?;
+            row_buf.clear();
+            let mut values = row.unwrap().into_iter();
+            for &(col_type, flags) in &col_types {
+                let val = values.next().unwrap_or(Value::NULL);
+                row_buf.push(format_mysql_text(val, col_type, flags));
+            }
+            let keep_going = on_row(&row_buf).map_err(DbError::message)?;
+            rows_streamed += 1;
+            if !keep_going {
+                break;
+            }
+        }
+
+        drop(result);
+        self.sync_tx_state_after_stmt(sql);
+        Ok(rows_streamed)
     }
 
     fn execute_atomic_batch(&mut self, statements: &[String]) -> Result<u64, DbError> {
@@ -569,57 +577,126 @@ fn load_runtime_info(conn: &mut Conn) -> Result<ServerRuntimeInfo, DbError> {
     })
 }
 
-fn format_mysql_value(val: Value, col_type: ColumnType, flags: ColumnFlags) -> CellValue {
+fn extract_mysql_columns(cols_slice: &[mysql::Column]) -> (Vec<ColumnMeta>, Vec<(ColumnType, ColumnFlags)>) {
+    let columns = cols_slice
+        .iter()
+        .map(|c| {
+            let flags = c.flags();
+            let col_type = c.column_type();
+            ColumnMeta {
+                name: c.name_str().into_owned(),
+                org_name: {
+                    let o = c.org_name_str();
+                    if o.is_empty() { None } else { Some(o.into_owned()) }
+                },
+                table: {
+                    let t = c.org_table_str();
+                    if t.is_empty() { None } else { Some(t.into_owned()) }
+                },
+                schema: {
+                    let s = c.schema_str();
+                    if s.is_empty() { None } else { Some(s.into_owned()) }
+                },
+                type_name: mysql_type_label(col_type, flags),
+                is_primary_key: flags.contains(ColumnFlags::PRI_KEY_FLAG),
+                is_unique_key: flags.contains(ColumnFlags::UNIQUE_KEY_FLAG),
+                is_nullable: !flags.contains(ColumnFlags::NOT_NULL_FLAG),
+                is_auto_increment: flags.contains(ColumnFlags::AUTO_INCREMENT_FLAG),
+                is_numeric: is_numeric_mysql_type(col_type),
+                is_binary: flags.contains(ColumnFlags::BINARY_FLAG),
+            }
+        })
+        .collect();
+
+    let col_types = cols_slice
+        .iter()
+        .map(|c| (c.column_type(), c.flags()))
+        .collect();
+
+    (columns, col_types)
+}
+
+fn format_mysql_bit(bytes: &[u8]) -> String {
+    let mut bits = String::with_capacity(bytes.len() * 8 + 3);
+    bits.push_str("b'");
+    for b in bytes {
+        bits.push_str(&format!("{b:08b}"));
+    }
+    bits.push('\'');
+    bits
+}
+
+fn format_hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(2 + bytes.len() * 2);
+    hex.push_str("0x");
+    for b in bytes {
+        hex.push_str(&format!("{b:02X}"));
+    }
+    hex
+}
+
+fn is_binary_blob(col_type: ColumnType, flags: ColumnFlags) -> bool {
+    flags.contains(ColumnFlags::BINARY_FLAG)
+        && matches!(
+            col_type,
+            ColumnType::MYSQL_TYPE_BLOB
+                | ColumnType::MYSQL_TYPE_TINY_BLOB
+                | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                | ColumnType::MYSQL_TYPE_LONG_BLOB
+                | ColumnType::MYSQL_TYPE_GEOMETRY
+        )
+}
+
+fn format_mysql_text(val: Value, col_type: ColumnType, flags: ColumnFlags) -> Option<String> {
     match val {
-        Value::NULL => CellValue::Null,
-        Value::Int(v) => CellValue::Text(v.to_string()),
-        Value::UInt(v) => CellValue::Text(v.to_string()),
-        Value::Float(v) => CellValue::Text(v.to_string()),
-        Value::Double(v) => CellValue::Text(v.to_string()),
+        Value::NULL => None,
+        Value::Int(v) => Some(v.to_string()),
+        Value::UInt(v) => Some(v.to_string()),
+        Value::Float(v) => Some(v.to_string()),
+        Value::Double(v) => Some(v.to_string()),
         Value::Date(y, m, d, h, min, s, us) => {
             if matches!(col_type, ColumnType::MYSQL_TYPE_DATE) {
-                CellValue::Text(format!("{y:04}-{m:02}-{d:02}"))
+                Some(format!("{y:04}-{m:02}-{d:02}"))
             } else if us > 0 {
-                CellValue::Text(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}.{us:06}"))
+                Some(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}.{us:06}"))
             } else {
-                CellValue::Text(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}"))
+                Some(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}"))
             }
         }
         Value::Time(neg, days, h, m, s, us) => {
             let sign = if neg { "-" } else { "" };
             let total_h = days.saturating_mul(24).saturating_add(h as u32);
             if us > 0 {
-                CellValue::Text(format!("{sign}{total_h:02}:{m:02}:{s:02}.{us:06}"))
+                Some(format!("{sign}{total_h:02}:{m:02}:{s:02}.{us:06}"))
             } else {
-                CellValue::Text(format!("{sign}{total_h:02}:{m:02}:{s:02}"))
+                Some(format!("{sign}{total_h:02}:{m:02}:{s:02}"))
             }
         }
         Value::Bytes(bytes) => {
             if col_type == ColumnType::MYSQL_TYPE_BIT {
-                let mut bits = String::with_capacity(bytes.len() * 8 + 3);
-                bits.push_str("b'");
-                for b in &bytes {
-                    bits.push_str(&format!("{b:08b}"));
-                }
-                bits.push('\'');
-                return CellValue::Text(bits);
+                return Some(format_mysql_bit(&bytes));
             }
-            if flags.contains(ColumnFlags::BINARY_FLAG)
-                && matches!(
-                    col_type,
-                    ColumnType::MYSQL_TYPE_BLOB
-                        | ColumnType::MYSQL_TYPE_TINY_BLOB
-                        | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
-                        | ColumnType::MYSQL_TYPE_LONG_BLOB
-                        | ColumnType::MYSQL_TYPE_GEOMETRY
-                )
-            {
+            if is_binary_blob(col_type, flags) {
+                return Some(format_hex(&bytes));
+            }
+            match String::from_utf8(bytes) {
+                Ok(s) => Some(s),
+                Err(e) => Some(format_hex(&e.into_bytes())),
+            }
+        }
+    }
+}
+
+fn format_mysql_value(val: Value, col_type: ColumnType, flags: ColumnFlags) -> CellValue {
+    match val {
+        Value::NULL => CellValue::Null,
+        Value::Bytes(bytes) => {
+            if col_type == ColumnType::MYSQL_TYPE_BIT {
+                return CellValue::Text(format_mysql_bit(&bytes));
+            }
+            if is_binary_blob(col_type, flags) {
                 let preview_len = bytes.len().min(64);
-                let mut hex = String::with_capacity(2 + preview_len * 2 + 24);
-                hex.push_str("0x");
-                for b in &bytes[..preview_len] {
-                    hex.push_str(&format!("{b:02X}"));
-                }
+                let hex = format_hex(&bytes[..preview_len]);
                 if bytes.len() > preview_len {
                     return CellValue::Truncated {
                         preview: hex,
@@ -633,17 +710,16 @@ fn format_mysql_value(val: Value, col_type: ColumnType, flags: ColumnFlags) -> C
                 Err(e) => {
                     let raw = e.into_bytes();
                     let preview_len = raw.len().min(64);
-                    let mut hex = String::from("0x");
-                    for b in &raw[..preview_len] {
-                        hex.push_str(&format!("{b:02X}"));
-                    }
                     CellValue::Truncated {
-                        preview: hex,
+                        preview: format_hex(&raw[..preview_len]),
                         total_bytes: raw.len(),
                     }
                 }
             }
         }
+        other => format_mysql_text(other, col_type, flags)
+            .map(CellValue::Text)
+            .unwrap_or(CellValue::Null),
     }
 }
 
@@ -733,5 +809,51 @@ mod tests {
             "connection refused",
         ));
         assert!(!mysql_error(refused).is_connection_lost);
+    }
+
+    #[test]
+    fn format_mysql_text_preserves_full_values_without_preview_truncation() {
+        assert_eq!(
+            format_mysql_text(Value::NULL, ColumnType::MYSQL_TYPE_LONG, ColumnFlags::empty()),
+            None
+        );
+        assert_eq!(
+            format_mysql_text(Value::Int(-7), ColumnType::MYSQL_TYPE_LONG, ColumnFlags::empty()),
+            Some("-7".into())
+        );
+        assert_eq!(
+            format_mysql_text(
+                Value::Date(2026, 11, 26, 0, 0, 0, 0),
+                ColumnType::MYSQL_TYPE_DATE,
+                ColumnFlags::empty(),
+            ),
+            Some("2026-11-26".into())
+        );
+        assert_eq!(
+            format_mysql_text(
+                Value::Bytes(vec![0b0000_0101]),
+                ColumnType::MYSQL_TYPE_BIT,
+                ColumnFlags::empty(),
+            ),
+            Some("b'00000101'".into())
+        );
+        let long_text = "x".repeat(8192);
+        assert_eq!(
+            format_mysql_text(
+                Value::Bytes(long_text.as_bytes().to_vec()),
+                ColumnType::MYSQL_TYPE_VARCHAR,
+                ColumnFlags::empty(),
+            ),
+            Some(long_text)
+        );
+        let blob = vec![0xAB; 100];
+        let hex = format_mysql_text(
+            Value::Bytes(blob),
+            ColumnType::MYSQL_TYPE_BLOB,
+            ColumnFlags::BINARY_FLAG,
+        )
+        .expect("hex output");
+        assert_eq!(hex.len(), 2 + 200);
+        assert!(hex.starts_with("0xABAB"));
     }
 }

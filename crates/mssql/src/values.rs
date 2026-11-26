@@ -10,7 +10,7 @@ pub(crate) fn cell_value(data: &ColumnData<'static>) -> CellValue {
     }
 }
 
-fn column_text(data: &ColumnData<'static>) -> Option<String> {
+pub(crate) fn column_text(data: &ColumnData<'static>) -> Option<String> {
     match data {
         ColumnData::U8(value) => value.map(|number| number.to_string()),
         ColumnData::I16(value) => value.map(|number| number.to_string()),

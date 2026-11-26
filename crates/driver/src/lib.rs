@@ -10,7 +10,7 @@ pub use error::DbError;
 pub use tunnel::SshTunnel;
 
 use cottondata_core::{ServerRuntimeInfo, SqlDialect};
-use cottondata_grid::ColumnarPage;
+use cottondata_grid::{ColumnMeta, ColumnarPage};
 
 #[derive(Debug, Clone)]
 pub enum QueryOutcome {
@@ -74,6 +74,13 @@ pub trait DatabaseSession: Send {
     fn commit(&mut self) -> Result<(), DbError>;
     fn rollback(&mut self) -> Result<(), DbError>;
     fn execute_sql(&mut self, sql: &str, max_rows: u32) -> Result<QueryOutcome, DbError>;
+    #[allow(clippy::type_complexity)]
+    fn stream_query(
+        &mut self,
+        sql: &str,
+        on_columns: &mut dyn FnMut(&[ColumnMeta]) -> Result<(), String>,
+        on_row: &mut dyn FnMut(&[Option<String>]) -> Result<bool, String>,
+    ) -> Result<u64, DbError>;
     fn execute_atomic_batch(&mut self, statements: &[String]) -> Result<u64, DbError>;
     fn explain(&mut self, sql: &str, analyze: bool) -> Result<ExplainResult, DbError>;
     fn fetch_processlist(&mut self) -> Result<Vec<ProcessEntry>, DbError>;

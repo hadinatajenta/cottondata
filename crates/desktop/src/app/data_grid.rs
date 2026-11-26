@@ -1,5 +1,5 @@
 use super::query_tab::RecordViewState;
-use super::{CottonDataApp, PendingDiscardAction};
+use super::{ActiveStreamExport, CottonDataApp, PendingDiscardAction};
 use crate::theme::Palette;
 use crate::ui_kit::{
     busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_text, pill, primary_button,
@@ -7,16 +7,20 @@ use crate::ui_kit::{
 };
 use crate::worker::SlotCmd;
 use cottondata_core::EnvironmentTag;
-use cottondata_grid::{export_rows, ExportFormat, SqlInsertTarget};
-use eframe::egui;
+use cottondata_grid::{export_rows, ExportFormat, SortDirection, SqlInsertTarget};
+use eframe::egui::{self, RichText};
 use std::fs::File;
 use std::io::BufWriter;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 impl CottonDataApp {
     pub(super) fn render_data_grid(&mut self, ui: &mut egui::Ui, p: Palette) {
         let mut reload_page_idx: Option<u64> = None;
         let mut count_rows_req = false;
-        let mut export_req = None;
+        let mut export_page_req = None;
+        let mut export_stream_req = None;
+        let mut cancel_export = false;
         let mut save_req: Option<bool> = None;
 
         let active_slot = self.tabs[self.active_tab_idx].slot.or(self.active_slot);
@@ -234,17 +238,69 @@ impl CottonDataApp {
                 }
             }
             toolbar_divider(ui, p);
-            egui::ComboBox::from_id_salt("export_menu")
-                .selected_text(icon_text(icon::EXPORT, p.accent, "Export", p.text_primary, 13.0))
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    for fmt in ExportFormat::ALL {
-                        if ui.selectable_label(false, fmt.label()).clicked() {
-                            export_req = Some(fmt);
+            let export_busy = self.active_export.is_some();
+            if let Some(exp) = &self.active_export {
+                busy_indicator(
+                    ui,
+                    p,
+                    &format!("Exporting {} rows ({})…", exp.rows_written, exp.path_label),
+                );
+                if tinted_ghost_button(ui, p.danger, icon::STOP, "Cancel", true).clicked() {
+                    cancel_export = true;
+                }
+            } else {
+                let page_rows = self.tabs[self.active_tab_idx]
+                    .page
+                    .as_ref()
+                    .map(|pg| pg.row_count)
+                    .unwrap_or(0);
+                let can_stream = active_slot.is_some()
+                    && (bound_table.is_some()
+                        || self.tabs[self.active_tab_idx]
+                            .page
+                            .as_ref()
+                            .is_some_and(|pg| !pg.executed_sql.trim().is_empty()));
+                egui::ComboBox::from_id_salt("export_menu")
+                    .selected_text(icon_text(icon::EXPORT, p.accent, "Export", p.text_primary, 13.0))
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("Current page ({page_rows} rows)"))
+                                .size(11.0)
+                                .strong()
+                                .color(p.text_muted),
+                        );
+                        for fmt in ExportFormat::ALL {
+                            if ui.selectable_label(false, fmt.label()).clicked() {
+                                export_page_req = Some(fmt);
+                            }
                         }
-                    }
-                });
+                        if can_stream && !export_busy {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("Full result (streaming, all rows)")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(p.accent),
+                            );
+                            for fmt in ExportFormat::ALL {
+                                if ui
+                                    .selectable_label(false, format!("Stream all → {}", fmt.short_label()))
+                                    .clicked()
+                                {
+                                    export_stream_req = Some(fmt);
+                                }
+                            }
+                        }
+                    });
+            }
         });
+
+        if cancel_export {
+            if let Some(exp) = &self.active_export {
+                exp.cancel_flag.store(true, Ordering::Relaxed);
+            }
+        }
 
         if sql_editor_toggled {
             self.mark_session_dirty();
@@ -275,8 +331,12 @@ impl CottonDataApp {
             }
         }
 
-        if let Some(fmt) = export_req {
+        if let Some(fmt) = export_page_req {
             self.export_active_page(fmt);
+        }
+
+        if let Some(fmt) = export_stream_req {
+            self.start_stream_export(fmt);
         }
 
         if let Some(force_preview) = save_req {
@@ -317,5 +377,89 @@ impl CottonDataApp {
                 self.notify_error(format!("Export failed: {err}"));
             }
         }
+    }
+
+    fn start_stream_export(&mut self, fmt: ExportFormat) {
+        if self.active_export.is_some() {
+            self.notify_warning("Another streaming export is already in progress.");
+            return;
+        }
+        let tab = &self.tabs[self.active_tab_idx];
+        let Some(slot_id) = tab.slot.or(self.active_slot) else {
+            self.notify_error("Connect to a server before exporting.");
+            return;
+        };
+        let Some(slot) = self.registry.get(slot_id) else {
+            return;
+        };
+        let profile = slot.profile.clone();
+        let active_schema = slot
+            .runtime
+            .as_ref()
+            .and_then(|r| r.current_schema.clone())
+            .or_else(|| profile.default_schema.clone());
+        let dialect = profile.engine.dialect();
+
+        let sql = if let Some((schema, table)) = &tab.bound_table {
+            let fq = dialect.qualified_table(schema, table);
+            let mut query = format!("SELECT * FROM {fq}");
+            if !tab.filter_sort.where_clause.trim().is_empty() {
+                query.push_str(" WHERE ");
+                query.push_str(tab.filter_sort.where_clause.trim());
+            }
+            if let Some((col, dir)) = &tab.filter_sort.order_by {
+                let dir_kw = match dir {
+                    SortDirection::Asc => "ASC",
+                    SortDirection::Desc => "DESC",
+                };
+                query.push_str(&format!(" ORDER BY {} {dir_kw}", dialect.quote_ident(col)));
+            }
+            query
+        } else if let Some(page) = &tab.page {
+            page.executed_sql.trim().trim_end_matches(';').to_string()
+        } else {
+            return;
+        };
+
+        if sql.is_empty() {
+            return;
+        }
+
+        let default_name = format!(
+            "{}_full.{}",
+            tab.title.replace(['.', ' ', '/'], "_"),
+            fmt.extension()
+        );
+        let Some(path) = rfd::FileDialog::new().set_file_name(&default_name).save_file() else {
+            return;
+        };
+        let table_name = tab.insert_target_table();
+        let password = self.storage.get_password(&profile.id);
+        self.export_seq += 1;
+        let export_id = self.export_seq;
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let path_label = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("export")
+            .to_string();
+
+        self.active_export = Some(ActiveStreamExport {
+            export_id,
+            path_label,
+            rows_written: 0,
+            cancel_flag: Arc::clone(&cancel_flag),
+        });
+        self.hub.stream_export_async(
+            export_id,
+            profile,
+            password,
+            active_schema,
+            sql,
+            fmt,
+            table_name,
+            path,
+            cancel_flag,
+        );
     }
 }

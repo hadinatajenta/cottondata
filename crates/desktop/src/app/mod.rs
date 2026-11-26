@@ -14,6 +14,7 @@ mod server_form;
 mod servers_card;
 mod sessions;
 mod settings_modal;
+mod snippets;
 mod sql_editor;
 mod table_actions;
 mod top_bar;
@@ -26,14 +27,35 @@ use activity::SlotActivity;
 use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_driver::{ProcessEntry, ServerHealthMetrics};
-use cottondata_storage::{AppStorage, ConnectedServerState, QueryHistoryItem, SessionTabState, SessionsStore};
+use cottondata_storage::{
+    AppStorage, ConnectedServerState, QueryHistoryItem, SessionTabState, SessionsStore, SnippetScopeFilter,
+    SnippetsStore,
+};
 use eframe::egui;
 use query_tab::{BottomDeckTab, QueryTab};
 use server_form::ServerModalState;
 use sessions::SessionModalState;
 use settings_modal::SettingsModalState;
+use snippets::SnippetModalState;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+pub(super) struct ActiveStreamExport {
+    pub export_id: u64,
+    pub path_label: String,
+    pub rows_written: u64,
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HistoryStatusFilter {
+    All,
+    Succeeded,
+    Failed,
+}
 
 #[derive(Clone)]
 pub(super) enum PendingDiscardAction {
@@ -97,6 +119,13 @@ pub struct CottonDataApp {
     show_system_schemas: bool,
     memory_budget: MemoryBudget,
     history: Vec<QueryHistoryItem>,
+    history_search: String,
+    history_status_filter: HistoryStatusFilter,
+    snippets_store: SnippetsStore,
+    snippet_search: String,
+    snippet_folder_filter: Option<String>,
+    snippet_scope_filter: SnippetScopeFilter,
+    snippet_modal: Option<SnippetModalState>,
     modal: Option<ServerModalState>,
     session_modal: Option<SessionModalState>,
     settings_modal: Option<SettingsModalState>,
@@ -115,6 +144,8 @@ pub struct CottonDataApp {
     last_ping_at: Instant,
     closed_tabs: Vec<SessionTabState>,
     test_conn_seq: u64,
+    export_seq: u64,
+    active_export: Option<ActiveStreamExport>,
 }
 
 impl CottonDataApp {
@@ -134,6 +165,7 @@ impl CottonDataApp {
         let show_system_schemas = sessions_store.show_system_schemas;
         let active_slot = registry.iter().next().map(|s| s.slot_id);
         let history = storage.load_history();
+        let snippets_store = storage.load_snippets();
         let mut hub = WorkerHub::new();
         hub.set_egui_ctx(cc.egui_ctx.clone());
 
@@ -155,6 +187,13 @@ impl CottonDataApp {
             show_system_schemas,
             memory_budget: MemoryBudget::default(),
             history,
+            history_search: String::new(),
+            history_status_filter: HistoryStatusFilter::All,
+            snippets_store,
+            snippet_search: String::new(),
+            snippet_folder_filter: None,
+            snippet_scope_filter: SnippetScopeFilter::All,
+            snippet_modal: None,
             modal: None,
             session_modal: None,
             settings_modal: None,
@@ -173,6 +212,8 @@ impl CottonDataApp {
             last_ping_at: Instant::now(),
             closed_tabs: Vec::new(),
             test_conn_seq: 0,
+            export_seq: 0,
+            active_export: None,
         };
         app.restore_active_session(true);
         app
@@ -353,6 +394,16 @@ impl CottonDataApp {
         self.persist_sessions_now();
     }
 
+    pub(super) fn is_any_modal_open(&self) -> bool {
+        self.modal.is_some()
+            || self.session_modal.is_some()
+            || self.settings_modal.is_some()
+            || self.snippet_modal.is_some()
+            || self.sql_preview_modal.is_some()
+            || self.unsaved_guard_modal.is_some()
+            || self.tabs[self.active_tab_idx].diff_rows.is_some()
+    }
+
     pub(super) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let keys = [
             egui::Key::Num1,
@@ -366,17 +417,15 @@ impl CottonDataApp {
             egui::Key::Num9,
             egui::Key::Num0,
         ];
-        let modal_open = self.modal.is_some()
-            || self.session_modal.is_some()
-            || self.settings_modal.is_some()
-            || self.sql_preview_modal.is_some()
-            || self.unsaved_guard_modal.is_some();
+        let modal_open = self.is_any_modal_open();
         let is_editing_cell = self.tabs[self.active_tab_idx].inline_editor.is_some();
         let mut run_query = false;
         let mut run_all_queries = false;
         let mut new_console = false;
         let mut reopen_tab = false;
         let mut close_active = false;
+        let mut open_find: Option<bool> = None;
+        let mut save_snippet = false;
         let mut chosen_slot = None;
         ctx.input(|i| {
             if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::Enter) {
@@ -396,6 +445,20 @@ impl CottonDataApp {
             if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::W) {
                 close_active = true;
             }
+            if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::F) {
+                open_find = Some(false);
+            }
+            if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::H) {
+                open_find = Some(true);
+            }
+            if !modal_open
+                && !is_editing_cell
+                && i.modifiers.command
+                && i.modifiers.shift
+                && i.key_pressed(egui::Key::S)
+            {
+                save_snippet = true;
+            }
             if !modal_open && i.modifiers.command {
                 for (idx, key) in keys.iter().enumerate() {
                     if i.key_pressed(*key) {
@@ -412,6 +475,13 @@ impl CottonDataApp {
             self.request_execute_active_tab(true);
         } else if run_query {
             self.request_execute_active_tab(false);
+        }
+        if let Some(show_replace) = open_find {
+            self.open_sql_find(show_replace);
+        }
+        if save_snippet {
+            let sql = self.tabs[self.active_tab_idx].sql.clone();
+            self.open_save_snippet_modal(sql);
         }
         if reopen_tab {
             self.reopen_closed_tab();

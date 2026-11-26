@@ -5,12 +5,13 @@ use crate::ui_kit::{banner, caption, card_frame, document_tab, icon, icon_button
 use eframe::egui::{self, CornerRadius, Margin, Shape, Stroke};
 use std::time::{Duration, Instant};
 
-const RESULT_TABS: [(BottomDeckTab, &str, &str); 5] = [
+const RESULT_TABS: [(BottomDeckTab, &str, &str); 6] = [
     (BottomDeckTab::DataGrid, icon::ROWS, "Data Grid"),
     (BottomDeckTab::DdlInspector, icon::CODE, "DDL & Indexes"),
     (BottomDeckTab::ExplainPlan, icon::CHART_BAR, "Explain Plan"),
     (BottomDeckTab::Monitor, icon::GAUGE, "Processlist & Health"),
     (BottomDeckTab::History, icon::CLOCK_COUNTER_CLOCKWISE, "History"),
+    (BottomDeckTab::Snippets, icon::BOOKMARK_SIMPLE, "Saved Queries"),
 ];
 
 const TOAST_WIDTH: f32 = 380.0;
@@ -228,6 +229,7 @@ impl CottonDataApp {
                 for (deck_tab, glyph, title) in RESULT_TABS {
                     let label = match deck_tab {
                         BottomDeckTab::History => format!("{title} ({})", self.history.len()),
+                        BottomDeckTab::Snippets => format!("{title} ({})", self.snippets_store.items.len()),
                         _ => title.to_string(),
                     };
                     if underline_tab(ui, palette, glyph, &label, self.bottom_tab == deck_tab).clicked() {
@@ -258,6 +260,7 @@ impl CottonDataApp {
             BottomDeckTab::ExplainPlan => self.render_explain_view(ui, palette),
             BottomDeckTab::Monitor => self.render_monitor_view(ui, palette),
             BottomDeckTab::History => self.render_history_view(ui, palette),
+            BottomDeckTab::Snippets => self.render_snippets_view(ui, palette),
         }
     }
 

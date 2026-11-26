@@ -1,10 +1,15 @@
 use crate::drivers::{kill_running_query, open_session};
 use cottondata_core::{ServerProfile, ServerRuntimeInfo, ServerSlotId, SERVER_SLOT_CAPACITY};
-use cottondata_grid::PageFilterSort;
-use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_driver::{DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, ServerHealthMetrics};
+use cottondata_grid::{ExportFormat, PageFilterSort, StreamExporter};
+use cottondata_introspect::{SchemaCatalog, TableDetail};
 use eframe::egui;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 pub enum SlotCmd {
@@ -146,6 +151,16 @@ pub enum WorkerEvent {
         result: Result<String, String>,
         elapsed_ms: u64,
     },
+    ExportProgress {
+        export_id: u64,
+        rows_written: u64,
+    },
+    ExportFinished {
+        export_id: u64,
+        path: PathBuf,
+        result: Result<u64, String>,
+        cancelled: bool,
+    },
 }
 
 struct SlotWorker {
@@ -248,6 +263,104 @@ impl WorkerHub {
                         request_id,
                         result,
                         elapsed_ms,
+                    },
+                );
+            });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stream_export_async(
+        &self,
+        export_id: u64,
+        profile: ServerProfile,
+        password: Option<String>,
+        active_schema: Option<String>,
+        sql: String,
+        format: ExportFormat,
+        table_name: String,
+        path: PathBuf,
+        cancel_flag: Arc<AtomicBool>,
+    ) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-stream-export".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let dialect = profile.engine.dialect();
+                let mut cancelled = false;
+                let result: Result<u64, String> = (|| {
+                    let mut session = open_session(&profile, password.as_deref()).map_err(|e| e.to_string())?;
+                    if let Some(schema) = active_schema.as_deref().filter(|s| !s.is_empty()) {
+                        session.set_schema(schema).map_err(|e| e.to_string())?;
+                    }
+                    let file = File::create(&path).map_err(|e| format!("Could not create export file: {e}"))?;
+                    let mut writer_slot = Some(BufWriter::with_capacity(64 * 1024, file));
+                    let exporter: std::cell::RefCell<Option<StreamExporter<BufWriter<File>>>> =
+                        std::cell::RefCell::new(None);
+                    let mut last_progress = std::time::Instant::now();
+
+                    session
+                        .stream_query(
+                            &sql,
+                            &mut |columns| {
+                                let w = writer_slot
+                                    .take()
+                                    .ok_or_else(|| "Export writer already initialized".to_string())?;
+                                let exp = StreamExporter::new(
+                                    w,
+                                    format,
+                                    columns.to_vec(),
+                                    dialect,
+                                    table_name.clone(),
+                                )
+                                .map_err(|e| e.to_string())?;
+                                *exporter.borrow_mut() = Some(exp);
+                                Ok(())
+                            },
+                            &mut |row| {
+                                if cancel_flag.load(Ordering::Relaxed) {
+                                    cancelled = true;
+                                    return Ok(false);
+                                }
+                                let mut guard = exporter.borrow_mut();
+                                let Some(exp) = guard.as_mut() else {
+                                    return Err("Missing column metadata before rows".to_string());
+                                };
+                                exp.write_row(row).map_err(|e| e.to_string())?;
+                                let written = exp.rows_written();
+                                if written.is_multiple_of(2000)
+                                    || last_progress.elapsed() >= std::time::Duration::from_millis(150)
+                                {
+                                    last_progress = std::time::Instant::now();
+                                    emit(
+                                        &ev_tx,
+                                        &ctx,
+                                        WorkerEvent::ExportProgress {
+                                            export_id,
+                                            rows_written: written,
+                                        },
+                                    );
+                                }
+                                Ok(true)
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+
+                    match exporter.into_inner() {
+                        Some(exp) => exp.finish().map_err(|e| e.to_string()),
+                        None => Ok(0),
+                    }
+                })();
+
+                emit(
+                    &ev_tx,
+                    &ctx,
+                    WorkerEvent::ExportFinished {
+                        export_id,
+                        path,
+                        result,
+                        cancelled,
                     },
                 );
             });

@@ -13,6 +13,7 @@ use eframe::egui::{self, Color32, RichText};
 impl CottonDataApp {
     pub(super) fn render_modals(&mut self, ctx: &egui::Context, p: Palette) {
         self.render_sessions_modal(ctx, p);
+        self.render_snippet_modal(ctx, p);
         self.render_row_diff_modal(ctx, p);
         self.render_unsaved_guard_modal(ctx, p);
         self.render_sql_preview_modal(ctx, p);

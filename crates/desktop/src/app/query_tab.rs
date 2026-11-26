@@ -11,6 +11,19 @@ pub(super) enum BottomDeckTab {
     ExplainPlan,
     Monitor,
     History,
+    Snippets,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct FindReplaceState {
+    pub(super) open: bool,
+    pub(super) show_replace: bool,
+    pub(super) query: String,
+    pub(super) replace_with: String,
+    pub(super) case_sensitive: bool,
+    pub(super) whole_word: bool,
+    pub(super) active_match: usize,
+    pub(super) focus_find: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +93,8 @@ pub(super) struct QueryTab {
     pub(super) is_submitting_mutations: bool,
     pub(super) is_loading_full_cell: bool,
     pub(super) show_sql_editor: bool,
+    pub(super) find_replace: FindReplaceState,
+    pub(super) pending_cursor_range: Option<(usize, usize)>,
 }
 
 impl QueryTab {
@@ -117,6 +132,8 @@ impl QueryTab {
             is_submitting_mutations: false,
             is_loading_full_cell: false,
             show_sql_editor: true,
+            find_replace: FindReplaceState::default(),
+            pending_cursor_range: None,
         }
     }
 
@@ -163,6 +180,8 @@ impl QueryTab {
             is_submitting_mutations: false,
             is_loading_full_cell: false,
             show_sql_editor: false,
+            find_replace: FindReplaceState::default(),
+            pending_cursor_range: None,
         }
     }
 
@@ -219,6 +238,8 @@ impl QueryTab {
             is_submitting_mutations: false,
             is_loading_full_cell: false,
             show_sql_editor: state.show_sql_editor.unwrap_or_else(|| state.bound_table.is_none()),
+            find_replace: FindReplaceState::default(),
+            pending_cursor_range: None,
         }
     }
 

@@ -305,12 +305,16 @@ pub fn format_sql_literal(dialect: SqlDialect, val: &CellValue, is_numeric: bool
         CellValue::Null => "NULL".to_string(),
         CellValue::DefaultExpr => "DEFAULT".to_string(),
         CellValue::Text(s) | CellValue::Truncated { preview: s, .. } => {
-            if is_numeric && is_plain_number(s) {
-                s.trim().to_string()
-            } else {
-                dialect.string_literal(s)
-            }
+            format_sql_text_literal(dialect, s, is_numeric)
         }
+    }
+}
+
+pub(crate) fn format_sql_text_literal(dialect: SqlDialect, s: &str, is_numeric: bool) -> String {
+    if is_numeric && is_plain_number(s) {
+        s.trim().to_string()
+    } else {
+        dialect.string_literal(s)
     }
 }
 

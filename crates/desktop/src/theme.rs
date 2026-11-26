@@ -235,7 +235,7 @@ pub fn highlight_mysql_layout(
     wrap_width: f32,
     palette: Palette,
 ) -> std::sync::Arc<egui::Galley> {
-    build_mysql_layout(ui, text, wrap_width, palette)
+    build_mysql_layout(ui, text, wrap_width, palette, &[], None)
 }
 
 pub fn highlight_mysql_editor_layout(
@@ -243,7 +243,17 @@ pub fn highlight_mysql_editor_layout(
     text: &str,
     palette: Palette,
 ) -> std::sync::Arc<egui::Galley> {
-    build_mysql_layout(ui, text, f32::INFINITY, palette)
+    build_mysql_layout(ui, text, f32::INFINITY, palette, &[], None)
+}
+
+pub fn highlight_mysql_editor_with_matches(
+    ui: &egui::Ui,
+    text: &str,
+    palette: Palette,
+    matches: &[(usize, usize)],
+    active_match: Option<usize>,
+) -> std::sync::Arc<egui::Galley> {
+    build_mysql_layout(ui, text, f32::INFINITY, palette, matches, active_match)
 }
 
 fn build_mysql_layout(
@@ -251,10 +261,16 @@ fn build_mysql_layout(
     text: &str,
     wrap_width: f32,
     palette: Palette,
+    matches: &[(usize, usize)],
+    active_match: Option<usize>,
 ) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
     let font_id = FontId::new(13.0, FontFamily::Monospace);
+    let mut byte_pos = 0usize;
+    let mut match_idx = 0usize;
+    let match_bg = palette.warning.gamma_multiply(0.32);
+    let active_bg = palette.accent.gamma_multiply(0.45);
 
     for token in tokenize(text) {
         let color = match token.kind {
@@ -267,15 +283,77 @@ fn build_mysql_layout(
             TokenKind::Identifier | TokenKind::Operator | TokenKind::Punctuation => palette.sql_ident,
             TokenKind::Whitespace => palette.text_primary,
         };
-        job.append(
-            token.text,
-            0.0,
-            TextFormat {
-                font_id: font_id.clone(),
-                color,
-                ..Default::default()
-            },
-        );
+        let tok_start = byte_pos;
+        let tok_end = tok_start + token.text.len();
+        byte_pos = tok_end;
+
+        if matches.is_empty() {
+            job.append(
+                token.text,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
+
+        while match_idx < matches.len() && matches[match_idx].1 <= tok_start {
+            match_idx += 1;
+        }
+
+        let mut cursor = tok_start;
+        let mut scan = match_idx;
+        while cursor < tok_end {
+            while scan < matches.len() && matches[scan].1 <= cursor {
+                scan += 1;
+            }
+            if scan >= matches.len() || matches[scan].0 >= tok_end {
+                let slice = &token.text[(cursor - tok_start)..];
+                job.append(
+                    slice,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+                break;
+            }
+            let (m_start, m_end) = matches[scan];
+            if cursor < m_start {
+                let seg_end = m_start.min(tok_end);
+                let slice = &token.text[(cursor - tok_start)..(seg_end - tok_start)];
+                job.append(
+                    slice,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+                cursor = seg_end;
+            } else {
+                let seg_end = m_end.min(tok_end);
+                let slice = &token.text[(cursor - tok_start)..(seg_end - tok_start)];
+                let bg = if active_match == Some(scan) { active_bg } else { match_bg };
+                job.append(
+                    slice,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color,
+                        background: bg,
+                        ..Default::default()
+                    },
+                );
+                cursor = seg_end;
+            }
+        }
     }
 
     ui.fonts(|fonts| fonts.layout_job(job))

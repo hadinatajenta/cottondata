@@ -1,8 +1,12 @@
 mod sessions;
+mod snippets;
 
 pub use sessions::{
     now_secs, ConnectedServerState, SessionSortOrder, SessionTabState, SessionsStore, WorkspaceSession,
     DEFAULT_SESSION_ID, MAX_SESSIONS,
+};
+pub use snippets::{
+    SavedQuery, SnippetScope, SnippetScopeFilter, SnippetsStore, MAX_SNIPPETS,
 };
 
 use cottondata_core::{ServerProfile, ServerRegistry, DEFAULT_MAX_SERVERS, SERVER_SLOT_CAPACITY};
@@ -76,6 +80,35 @@ impl AppStorage {
 
     fn sessions_path(&self) -> PathBuf {
         self.data_dir.join("sessions.json")
+    }
+
+    fn snippets_path(&self) -> PathBuf {
+        self.data_dir.join("snippets.json")
+    }
+
+    pub fn load_snippets(&self) -> SnippetsStore {
+        let path = self.snippets_path();
+        let Ok(raw) = fs::read_to_string(path) else {
+            return SnippetsStore::default();
+        };
+        let mut store: SnippetsStore = serde_json::from_str(&raw).unwrap_or_default();
+        if store.version == 0 {
+            store.version = 1;
+        }
+        store
+    }
+
+    pub fn save_snippets(&self, store: &SnippetsStore) -> io::Result<()> {
+        let payload = serde_json::to_string_pretty(store).map_err(io::Error::other)?;
+        let path = self.snippets_path();
+        let tmp = self.data_dir.join("snippets.json.tmp");
+        fs::write(&tmp, payload)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+        fs::rename(tmp, path)
     }
 
     pub fn load_sessions(&self) -> SessionsStore {
@@ -378,6 +411,61 @@ mod tests {
         reloaded.delete_session(&dup_id).unwrap();
         assert_eq!(reloaded.sessions.len(), 1);
         assert!(reloaded.delete_session(DEFAULT_SESSION_ID).is_err());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persists_and_reloads_saved_queries_and_falls_back_on_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cottondata-snippets-test-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let storage = AppStorage::open_at(dir.clone()).unwrap();
+
+        let empty = storage.load_snippets();
+        assert_eq!(empty.version, 1);
+        assert!(empty.items.is_empty());
+
+        let mut store = empty;
+        let id1 = store
+            .upsert(
+                None,
+                "Daily Revenue".into(),
+                "Finance".into(),
+                SnippetScope::Global,
+                true,
+                "SELECT SUM(total) FROM orders;".into(),
+            )
+            .unwrap();
+        let id2 = store
+            .upsert(
+                None,
+                "Slow Queries".into(),
+                "Ops".into(),
+                SnippetScope::Server("srv-prod".into()),
+                false,
+                "SHOW FULL PROCESSLIST;".into(),
+            )
+            .unwrap();
+
+        storage.save_snippets(&store).unwrap();
+
+        let mut reloaded = storage.load_snippets();
+        assert_eq!(reloaded, store);
+        assert_eq!(reloaded.folders(), vec!["Finance", "Ops"]);
+        assert!(reloaded.toggle_pin(&id2));
+        assert!(reloaded.delete(&id1));
+        storage.save_snippets(&reloaded).unwrap();
+
+        let reloaded_again = storage.load_snippets();
+        assert_eq!(reloaded_again.items.len(), 1);
+        assert_eq!(reloaded_again.items[0].id, id2);
+        assert!(reloaded_again.items[0].pinned);
+
+        fs::write(dir.join("snippets.json"), "{ invalid json").unwrap();
+        let recovered = storage.load_snippets();
+        assert_eq!(recovered, SnippetsStore::default());
 
         let _ = fs::remove_dir_all(dir);
     }

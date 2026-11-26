@@ -443,6 +443,40 @@ impl CottonDataApp {
                         }
                     }
                 }
+                WorkerEvent::ExportProgress {
+                    export_id,
+                    rows_written,
+                } => {
+                    if let Some(exp) = self.active_export.as_mut() {
+                        if exp.export_id == export_id {
+                            exp.rows_written = rows_written;
+                        }
+                    }
+                }
+                WorkerEvent::ExportFinished {
+                    export_id,
+                    path,
+                    result,
+                    cancelled,
+                } => {
+                    if self.active_export.as_ref().is_some_and(|e| e.export_id == export_id) {
+                        self.active_export = None;
+                    }
+                    match result {
+                        Ok(rows) if cancelled => {
+                            self.notify_warning(format!(
+                                "Export cancelled after {rows} rows ({})",
+                                path.display()
+                            ));
+                        }
+                        Ok(rows) => {
+                            self.notify_success(format!("Stream-exported {rows} rows to {}", path.display()));
+                        }
+                        Err(err) => {
+                            self.notify_error(format!("Stream export failed: {err}"));
+                        }
+                    }
+                }
             }
         }
     }

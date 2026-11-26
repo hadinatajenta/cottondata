@@ -1,8 +1,8 @@
-use super::{truncate_display, CottonDataApp};
+use super::{truncate_display, CottonDataApp, HistoryStatusFilter};
 use crate::theme::{highlight_mysql_layout, Palette};
 use crate::ui_kit::{
-    banner, busy_indicator, caption, empty_state, ghost_button, icon, icon_text, inset_frame, loading_state, pill,
-    tinted_ghost_button,
+    banner, busy_indicator, caption, empty_state, ghost_button, icon, icon_button, icon_text, inset_frame,
+    loading_state, pill, secondary_button, segmented_tabs, status_dot, styled_text_input, tinted_ghost_button,
 };
 use crate::worker::SlotCmd;
 use cottondata_core::ServerSlotId;
@@ -216,7 +216,6 @@ impl CottonDataApp {
     }
 
     pub(super) fn render_history_view(&mut self, ui: &mut egui::Ui, p: Palette) {
-        let mut load_sql = None;
         if self.history.is_empty() {
             empty_state(
                 ui,
@@ -226,27 +225,135 @@ impl CottonDataApp {
             );
             return;
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for item in &self.history {
-                ui.horizontal(|ui| {
-                    if ghost_button(ui, p, icon::ARROW_U_UP_LEFT, "Load", true).clicked() {
-                        load_sql = Some(item.sql.clone());
-                    }
-                    ui.label(
-                        RichText::new(format!(
-                            "[{} · {} ms] {}",
-                            item.server_name,
-                            item.elapsed_ms,
-                            truncate_display(&item.sql.replace('\n', " "), 110)
-                        ))
-                        .font(FontId::new(11.5, FontFamily::Monospace))
-                        .color(p.text_primary),
-                    );
-                });
+
+        ui.horizontal_wrapped(|ui| {
+            styled_text_input(
+                ui,
+                p,
+                "history_search_input",
+                &mut self.history_search,
+                "Search SQL, server, or schema…",
+                260.0,
+            );
+            segmented_tabs(
+                ui,
+                p,
+                &mut self.history_status_filter,
+                &[
+                    (HistoryStatusFilter::All, "", "All"),
+                    (HistoryStatusFilter::Succeeded, "", "OK"),
+                    (HistoryStatusFilter::Failed, "", "Failed"),
+                ],
+            );
+            if !self.history_search.is_empty() && icon_button(ui, p, icon::X, "Clear search").clicked() {
+                self.history_search.clear();
             }
         });
-        if let Some(sql) = load_sql {
-            self.tabs[self.active_tab_idx].sql = sql;
+        ui.add_space(6.0);
+
+        let needle = self.history_search.trim().to_ascii_lowercase();
+        let filtered_indices: Vec<usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                let status_ok = match self.history_status_filter {
+                    HistoryStatusFilter::All => true,
+                    HistoryStatusFilter::Succeeded => item.succeeded,
+                    HistoryStatusFilter::Failed => !item.succeeded,
+                };
+                if !status_ok {
+                    return false;
+                }
+                if needle.is_empty() {
+                    return true;
+                }
+                item.sql.to_ascii_lowercase().contains(&needle)
+                    || item.server_name.to_ascii_lowercase().contains(&needle)
+                    || item
+                        .schema
+                        .as_deref()
+                        .is_some_and(|s| s.to_ascii_lowercase().contains(&needle))
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if filtered_indices.is_empty() {
+            empty_state(ui, p, icon::MAGNIFYING_GLASS, "No history entries match your search.");
+            return;
+        }
+
+        let mut open_new_tab_sql = None;
+        let mut load_sql = None;
+        let mut save_snippet_sql = None;
+        let mut copy_sql = None;
+
+        egui::ScrollArea::vertical()
+            .id_salt("history_list_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for idx in filtered_indices {
+                    let item = &self.history[idx];
+                    ui.horizontal(|ui| {
+                        status_dot(ui, if item.succeeded { p.success } else { p.danger });
+                        if secondary_button(ui, p, icon::PLUS, "New Tab", true)
+                            .on_hover_text("Open query in a new console tab")
+                            .clicked()
+                        {
+                            open_new_tab_sql = Some(item.sql.clone());
+                        }
+                        if ghost_button(ui, p, icon::ARROW_U_UP_LEFT, "Load", true)
+                            .on_hover_text("Replace active console SQL")
+                            .clicked()
+                        {
+                            load_sql = Some(item.sql.clone());
+                        }
+                        if icon_button(ui, p, icon::BOOKMARK_SIMPLE, "Save as snippet").clicked() {
+                            save_snippet_sql = Some(item.sql.clone());
+                        }
+                        if icon_button(ui, p, icon::COPY, "Copy SQL").clicked() {
+                            copy_sql = Some(item.sql.clone());
+                        }
+                        let schema_part = item
+                            .schema
+                            .as_deref()
+                            .map(|s| format!(" · {s}"))
+                            .unwrap_or_default();
+                        ui.label(icon_text(
+                            icon::CLOCK,
+                            p.text_muted,
+                            &format!("{}{} · {} ms", item.server_name, schema_part, item.elapsed_ms),
+                            p.text_muted,
+                            11.5,
+                        ));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(truncate_display(&item.sql.replace('\n', " "), 120))
+                                    .font(FontId::new(11.5, FontFamily::Monospace))
+                                    .color(p.text_primary),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&item.sql);
+                    });
+                    ui.add_space(2.0);
+                }
+            });
+
+        if let Some(sql) = open_new_tab_sql {
+            self.open_console_tab_for_slot(self.active_slot, Some(sql));
+        } else if let Some(sql) = load_sql {
+            let tab = &mut self.tabs[self.active_tab_idx];
+            tab.sql = sql;
+            tab.show_sql_editor = true;
+            self.persist_sessions_now();
+        }
+        if let Some(sql) = save_snippet_sql {
+            self.open_save_snippet_modal(sql);
+        }
+        if let Some(sql) = copy_sql {
+            ui.ctx().copy_text(sql);
+            self.notify_success("Copied SQL from history");
         }
     }
 }

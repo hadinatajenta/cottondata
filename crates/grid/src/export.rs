@@ -1,5 +1,5 @@
-use crate::mutator::format_sql_literal;
-use crate::page::ColumnarPage;
+use crate::mutator::{format_sql_literal, format_sql_text_literal};
+use crate::page::{ColumnMeta, ColumnarPage};
 use cottondata_core::SqlDialect;
 use std::io::{self, Write};
 
@@ -93,18 +93,146 @@ pub fn export_sql_inserts<W: Write>(page: &ColumnarPage, table_name: &str, write
     export_rows(page, &all_rows(page), ExportFormat::SqlInserts, &SqlInsertTarget::mysql(table_name), writer)
 }
 
+pub struct StreamExporter<W: Write> {
+    writer: W,
+    format: ExportFormat,
+    columns: Vec<ColumnMeta>,
+    dialect: SqlDialect,
+    quoted_table: String,
+    quoted_columns: String,
+    rows_written: u64,
+}
+
+impl<W: Write> StreamExporter<W> {
+    pub fn new(
+        mut writer: W,
+        format: ExportFormat,
+        columns: Vec<ColumnMeta>,
+        dialect: SqlDialect,
+        table_name: String,
+    ) -> io::Result<Self> {
+        match format {
+            ExportFormat::Csv => write_delimited_header(&columns, b',', &mut writer)?,
+            ExportFormat::Tsv => write_delimited_header(&columns, b'\t', &mut writer)?,
+            ExportFormat::JsonArray => writer.write_all(b"[\n")?,
+            ExportFormat::JsonLines | ExportFormat::SqlInserts => {}
+        }
+
+        let (quoted_table, quoted_columns) = if format == ExportFormat::SqlInserts {
+            let quoted_table = dialect.quote_ident(&table_name);
+            let quoted_columns = columns
+                .iter()
+                .map(|column| dialect.quote_ident(&column.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (quoted_table, quoted_columns)
+        } else {
+            (String::new(), String::new())
+        };
+
+        Ok(Self {
+            writer,
+            format,
+            columns,
+            dialect,
+            quoted_table,
+            quoted_columns,
+            rows_written: 0,
+        })
+    }
+
+    pub fn write_row(&mut self, values: &[Option<String>]) -> io::Result<()> {
+        match self.format {
+            ExportFormat::Csv => write_delimited_values_row(&self.columns, values, b',', &mut self.writer)?,
+            ExportFormat::Tsv => write_delimited_values_row(&self.columns, values, b'\t', &mut self.writer)?,
+            ExportFormat::JsonLines => {
+                write_json_values_row(&self.columns, values, &mut self.writer)?;
+                self.writer.write_all(b"\n")?;
+            }
+            ExportFormat::JsonArray => {
+                if self.rows_written > 0 {
+                    self.writer.write_all(b",\n")?;
+                }
+                self.writer.write_all(b"  ")?;
+                write_json_values_row(&self.columns, values, &mut self.writer)?;
+            }
+            ExportFormat::SqlInserts => {
+                if !self.columns.is_empty() {
+                    write!(
+                        self.writer,
+                        "INSERT INTO {} ({}) VALUES (",
+                        self.quoted_table, self.quoted_columns
+                    )?;
+                    for (column_index, meta) in self.columns.iter().enumerate() {
+                        if column_index > 0 {
+                            self.writer.write_all(b", ")?;
+                        }
+                        match values.get(column_index).and_then(Option::as_deref) {
+                            Some(text) => {
+                                let literal = format_sql_text_literal(self.dialect, text, meta.is_numeric);
+                                self.writer.write_all(literal.as_bytes())?;
+                            }
+                            None => self.writer.write_all(b"NULL")?,
+                        }
+                    }
+                    self.writer.write_all(b");\n")?;
+                }
+            }
+        }
+        self.rows_written += 1;
+        Ok(())
+    }
+
+    pub fn rows_written(&self) -> u64 {
+        self.rows_written
+    }
+
+    pub fn finish(mut self) -> io::Result<u64> {
+        if self.format == ExportFormat::JsonArray {
+            if self.rows_written > 0 {
+                self.writer.write_all(b"\n]\n")?;
+            } else {
+                self.writer.write_all(b"]\n")?;
+            }
+        }
+        self.writer.flush()?;
+        Ok(self.rows_written)
+    }
+}
+
 fn all_rows(page: &ColumnarPage) -> Vec<usize> {
     (0..page.row_count).collect()
 }
 
-fn write_delimited<W: Write>(page: &ColumnarPage, rows: &[usize], delimiter: u8, writer: &mut W) -> io::Result<()> {
-    for (column_index, column) in page.columns.iter().enumerate() {
+fn write_delimited_header<W: Write>(columns: &[ColumnMeta], delimiter: u8, writer: &mut W) -> io::Result<()> {
+    for (column_index, column) in columns.iter().enumerate() {
         if column_index > 0 {
             writer.write_all(&[delimiter])?;
         }
         write_delimited_field(writer, &column.name, delimiter)?;
     }
-    writer.write_all(b"\n")?;
+    writer.write_all(b"\n")
+}
+
+fn write_delimited_values_row<W: Write>(
+    columns: &[ColumnMeta],
+    values: &[Option<String>],
+    delimiter: u8,
+    writer: &mut W,
+) -> io::Result<()> {
+    for column_index in 0..columns.len() {
+        if column_index > 0 {
+            writer.write_all(&[delimiter])?;
+        }
+        if let Some(value) = values.get(column_index).and_then(Option::as_deref) {
+            write_delimited_field(writer, value, delimiter)?;
+        }
+    }
+    writer.write_all(b"\n")
+}
+
+fn write_delimited<W: Write>(page: &ColumnarPage, rows: &[usize], delimiter: u8, writer: &mut W) -> io::Result<()> {
+    write_delimited_header(&page.columns, delimiter, writer)?;
 
     for &row in rows {
         for column_index in 0..page.columns.len() {
@@ -160,6 +288,25 @@ fn write_json_row<W: Write>(page: &ColumnarPage, row: usize, writer: &mut W) -> 
         serde_json::to_writer(&mut *writer, &column.name).map_err(io::Error::other)?;
         writer.write_all(b":")?;
         let json_value = to_json_value(page.cell_str(row, column_index), column.is_numeric);
+        serde_json::to_writer(&mut *writer, &json_value).map_err(io::Error::other)?;
+    }
+    writer.write_all(b"}")
+}
+
+fn write_json_values_row<W: Write>(
+    columns: &[ColumnMeta],
+    values: &[Option<String>],
+    writer: &mut W,
+) -> io::Result<()> {
+    writer.write_all(b"{")?;
+    for (column_index, column) in columns.iter().enumerate() {
+        if column_index > 0 {
+            writer.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *writer, &column.name).map_err(io::Error::other)?;
+        writer.write_all(b":")?;
+        let cell = values.get(column_index).and_then(Option::as_deref);
+        let json_value = to_json_value(cell, column.is_numeric);
         serde_json::to_writer(&mut *writer, &json_value).map_err(io::Error::other)?;
     }
     writer.write_all(b"}")
@@ -319,5 +466,112 @@ mod tests {
     fn out_of_range_rows_are_ignored_and_empty_selection_writes_nothing_for_sql() {
         assert_eq!(render(&[99], ExportFormat::Tsv), "id\tnote\n");
         assert_eq!(render(&[], ExportFormat::SqlInserts), "");
+    }
+
+    fn stream_render(
+        page: &ColumnarPage,
+        rows: &[usize],
+        format: ExportFormat,
+        dialect: SqlDialect,
+        table_name: &str,
+    ) -> (String, u64) {
+        let mut buffer = Vec::new();
+        let mut exporter = StreamExporter::new(
+            &mut buffer,
+            format,
+            page.columns.clone(),
+            dialect,
+            table_name.to_string(),
+        )
+        .expect("stream exporter init succeeds");
+        for (idx, &row) in rows.iter().enumerate() {
+            let values: Vec<Option<String>> = (0..page.columns.len())
+                .map(|col| page.cell_str(row, col).map(str::to_string))
+                .collect();
+            exporter.write_row(&values).expect("stream write_row succeeds");
+            assert_eq!(exporter.rows_written(), (idx + 1) as u64);
+        }
+        let written = exporter.finish().expect("stream finish succeeds");
+        (String::from_utf8(buffer).expect("utf8 output"), written)
+    }
+
+    fn rich_page() -> ColumnarPage {
+        let mut page = ColumnarPage::new(
+            vec![
+                column("id", true),
+                column("amount", true),
+                column("note", false),
+                column("code", false),
+            ],
+            "SELECT id, amount, note, code FROM orders".into(),
+        );
+        page.push_row(&[
+            CellValue::Text("1".into()),
+            CellValue::Text("12.50".into()),
+            CellValue::Text("plain text".into()),
+            CellValue::Text("42".into()),
+        ]);
+        page.push_row(&[
+            CellValue::Text("-42".into()),
+            CellValue::Text("0.00".into()),
+            CellValue::Text("comma, \"quote\", tab\there\nnewline".into()),
+            CellValue::Text("it's ok".into()),
+        ]);
+        page.push_row(&[
+            CellValue::Text("18446744073709551615".into()),
+            CellValue::Null,
+            CellValue::Null,
+            CellValue::Text("".into()),
+        ]);
+        page
+    }
+
+    #[test]
+    fn stream_exporter_matches_export_rows_across_all_formats_and_dialects() {
+        let page = rich_page();
+        let all: Vec<usize> = (0..page.row_count).collect();
+        let selections: &[&[usize]] = &[&[], &[0], &[0, 2], &all];
+        let dialects = [SqlDialect::MySql, SqlDialect::SqlServer];
+
+        for &dialect in &dialects {
+            let target = SqlInsertTarget {
+                dialect,
+                table_name: "orders",
+            };
+            for &format in &ExportFormat::ALL {
+                for &rows in selections {
+                    let mut batch_buffer = Vec::new();
+                    export_rows(&page, rows, format, &target, &mut batch_buffer).expect("batch export succeeds");
+                    let expected = String::from_utf8(batch_buffer).expect("utf8");
+
+                    let (actual, written) = stream_render(&page, rows, format, dialect, "orders");
+                    assert_eq!(written, rows.len() as u64);
+                    assert_eq!(
+                        actual, expected,
+                        "mismatch for format={format:?} dialect={dialect:?} rows={rows:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stream_exporter_zero_rows_formats_cleanly() {
+        let page = sample_page();
+        let (json_arr, count) = stream_render(&page, &[], ExportFormat::JsonArray, SqlDialect::MySql, "users");
+        assert_eq!(count, 0);
+        assert_eq!(json_arr, "[\n]\n");
+
+        let (csv, _) = stream_render(&page, &[], ExportFormat::Csv, SqlDialect::MySql, "users");
+        assert_eq!(csv, "id,note\n");
+
+        let (tsv, _) = stream_render(&page, &[], ExportFormat::Tsv, SqlDialect::MySql, "users");
+        assert_eq!(tsv, "id\tnote\n");
+
+        let (jsonl, _) = stream_render(&page, &[], ExportFormat::JsonLines, SqlDialect::MySql, "users");
+        assert_eq!(jsonl, "");
+
+        let (sql, _) = stream_render(&page, &[], ExportFormat::SqlInserts, SqlDialect::SqlServer, "users");
+        assert_eq!(sql, "");
     }
 }
