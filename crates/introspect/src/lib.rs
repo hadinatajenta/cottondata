@@ -1,5 +1,5 @@
 use cottondata_driver::{DatabaseSession, DbError, SchemaObjects, SchemaSummary};
-pub use cottondata_driver::{ForeignKeyInfo, IndexInfo, TableDetail, TableKind};
+pub use cottondata_driver::{ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, TableDetail, TableKind};
 use cottondata_sql::SchemaTableHint;
 use lasso::{Rodeo, Spur};
 

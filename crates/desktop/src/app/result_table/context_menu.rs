@@ -27,6 +27,73 @@ pub(super) fn render_cell_context_menu(
     let row_noun = if target_row_count == 1 { "row" } else { "rows" };
     ui.set_min_width(240.0);
 
+    let mut showed_fk_section = false;
+    if row < view.page.row_count && view.page.cell_str(row, column).is_some() {
+        if let Some(fk) = view.outbound_fk_for_column(column) {
+            if menu_item(
+                ui,
+                icon_text(
+                    icon::ARROW_SQUARE_OUT,
+                    palette.accent,
+                    &format!("Go to {}.{}", fk.ref_table, fk.ref_column),
+                    palette.text_primary,
+                    13.0,
+                ),
+                "⌘Click",
+            ) {
+                action = Some(TableAction::NavigateFk {
+                    target_schema: fk.ref_schema.clone(),
+                    target_table: fk.ref_table.clone(),
+                    target_column: fk.ref_column.clone(),
+                    row,
+                    column,
+                });
+            }
+            showed_fk_section = true;
+        }
+        let inbound_fks = view.inbound_fks_for_column(column);
+        if !inbound_fks.is_empty() {
+            ui.menu_button(
+                icon_text(
+                    icon::FLOW_ARROW,
+                    palette.icon_table,
+                    &format!("Find referencing rows ({})", inbound_fks.len()),
+                    palette.text_primary,
+                    13.0,
+                ),
+                |ui| {
+                    ui.set_min_width(220.0);
+                    for fk in &inbound_fks {
+                        if menu_item(
+                            ui,
+                            icon_text(
+                                icon::TABLE,
+                                palette.icon_table,
+                                &format!("{}.{}", fk.source_table, fk.source_column),
+                                palette.text_primary,
+                                12.5,
+                            ),
+                            "",
+                        ) {
+                            action = Some(TableAction::NavigateFk {
+                                target_schema: fk.source_schema.clone(),
+                                target_table: fk.source_table.clone(),
+                                target_column: fk.source_column.clone(),
+                                row,
+                                column,
+                            });
+                            ui.close_menu();
+                        }
+                    }
+                },
+            );
+            showed_fk_section = true;
+        }
+    }
+    if showed_fk_section {
+        ui.separator();
+    }
+
     if menu_item(
         ui,
         icon_text(

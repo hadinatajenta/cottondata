@@ -1,7 +1,7 @@
 use crate::client::mysql_error;
 use cottondata_driver::{
-    ColumnSummary, DbError, ForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects, SchemaSummary, TableDetail,
-    TableKind, TableSummary,
+    ColumnSummary, DbError, ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects,
+    SchemaSummary, TableDetail, TableKind, TableSummary,
 };
 use mysql::prelude::Queryable;
 use mysql::Conn;
@@ -179,6 +179,37 @@ pub(crate) fn load_table_detail(conn: &mut Conn, schema: &str, table: &str) -> R
         )
         .collect();
 
+    let inbound_foreign_key_rows: Vec<(String, String, String, String, String, String, String)> = conn
+        .exec(
+            "SELECT k.constraint_name, k.table_schema, k.table_name, k.column_name, \
+                    k.referenced_column_name, r.update_rule, r.delete_rule \
+             FROM information_schema.key_column_usage k \
+             JOIN information_schema.referential_constraints r \
+               ON k.constraint_schema = r.constraint_schema \
+              AND k.constraint_name = r.constraint_name \
+             WHERE k.referenced_table_schema = ? AND k.referenced_table_name = ? \
+               AND k.referenced_column_name IS NOT NULL \
+             ORDER BY k.table_schema, k.table_name, k.constraint_name, k.ordinal_position",
+            (schema, table),
+        )
+        .unwrap_or_default();
+    let inbound_foreign_keys = inbound_foreign_key_rows
+        .into_iter()
+        .map(
+            |(constraint_name, source_schema, source_table, source_column, target_column, update_rule, delete_rule)| {
+                InboundForeignKeyInfo {
+                    constraint_name,
+                    source_schema,
+                    source_table,
+                    source_column,
+                    target_column,
+                    update_rule,
+                    delete_rule,
+                }
+            },
+        )
+        .collect();
+
     Ok(TableDetail {
         ddl,
         engine,
@@ -186,6 +217,7 @@ pub(crate) fn load_table_detail(conn: &mut Conn, schema: &str, table: &str) -> R
         row_estimate,
         indexes: indexes.into_values().collect(),
         foreign_keys,
+        inbound_foreign_keys,
     })
 }
 

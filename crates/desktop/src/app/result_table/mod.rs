@@ -10,6 +10,7 @@ pub(super) use cells::{compute_column_widths, compute_single_column_width};
 use cells::{append_text, modified_cell_tooltip, paint_cell, row_badge, single_line_galley};
 use context_menu::render_cell_context_menu;
 use cottondata_grid::{ColumnarPage, Editability, ExportFormat, SortDirection, StagedMutator};
+use cottondata_introspect::{ForeignKeyInfo, InboundForeignKeyInfo, TableDetail};
 use eframe::egui::{self, text::LayoutJob, Align2, FontId, Rect, Sense, Stroke, Ui};
 
 const ROW_NUMBER_WIDTH: f32 = 56.0;
@@ -30,6 +31,34 @@ pub(super) struct ResultTableView<'a> {
     pub(super) order_by: Option<&'a (String, SortDirection)>,
     pub(super) is_sortable: bool,
     pub(super) editability: &'a Editability,
+    pub(super) table_detail: Option<&'a TableDetail>,
+}
+
+impl<'a> ResultTableView<'a> {
+    pub(super) fn outbound_fk_for_column(&self, column: usize) -> Option<&'a ForeignKeyInfo> {
+        let detail = self.table_detail?;
+        let col_meta = self.page.columns.get(column)?;
+        let col_name = col_meta.sql_column_name();
+        detail
+            .foreign_keys
+            .iter()
+            .find(|fk| fk.column_name.eq_ignore_ascii_case(col_name))
+    }
+
+    pub(super) fn inbound_fks_for_column(&self, column: usize) -> Vec<&'a InboundForeignKeyInfo> {
+        let Some(detail) = self.table_detail else {
+            return Vec::new();
+        };
+        let Some(col_meta) = self.page.columns.get(column) else {
+            return Vec::new();
+        };
+        let col_name = col_meta.sql_column_name();
+        detail
+            .inbound_foreign_keys
+            .iter()
+            .filter(|fk| fk.target_column.eq_ignore_ascii_case(col_name))
+            .collect()
+    }
 }
 
 pub(super) enum TableAction {
@@ -82,6 +111,13 @@ pub(super) enum TableAction {
         row: usize,
         column: usize,
         negate: bool,
+    },
+    NavigateFk {
+        target_schema: String,
+        target_table: String,
+        target_column: String,
+        row: usize,
+        column: usize,
     },
     CopyColumnAsIn {
         row: usize,
@@ -315,6 +351,12 @@ fn paint_body_row(
         }
         if let Some(tooltip) = modified_cell_tooltip(view, row, column_index) {
             response.clone().on_hover_text(tooltip);
+        } else if row < view.page.row_count && view.page.cell_str(row, column_index).is_some() {
+            if let Some(fk) = view.outbound_fk_for_column(column_index) {
+                response
+                    .clone()
+                    .on_hover_text(format!("FK → {}.{} · Cmd+Click to open", fk.ref_table, fk.ref_column));
+            }
         }
         response.context_menu(|ui| {
             if let Some(menu_action) = render_cell_context_menu(ui, view, row, column_index) {
@@ -422,7 +464,20 @@ fn cell_response_action(
         return Some(TableAction::OpenInspector { row, column });
     }
     if response.clicked() {
-        let mode = RowSelectMode::from_modifiers(ui.input(|input| input.modifiers));
+        let modifiers = ui.input(|input| input.modifiers);
+        if modifiers.command && !modifiers.shift && row < view.page.row_count && view.page.cell_str(row, column).is_some()
+        {
+            if let Some(fk) = view.outbound_fk_for_column(column) {
+                return Some(TableAction::NavigateFk {
+                    target_schema: fk.ref_schema.clone(),
+                    target_table: fk.ref_table.clone(),
+                    target_column: fk.ref_column.clone(),
+                    row,
+                    column,
+                });
+            }
+        }
+        let mode = RowSelectMode::from_modifiers(modifiers);
         return Some(TableAction::SelectCell { row, column, mode });
     }
     if response.secondary_clicked() && !view.row_selection.contains(row) {

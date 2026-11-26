@@ -4,8 +4,8 @@ use crate::rows::{flag, int, optional_text, text, MssqlClient};
 use crate::values::format_declared_type;
 use cottondata_core::SqlDialect;
 use cottondata_driver::{
-    ColumnSummary, DbError, ForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects, SchemaSummary, TableDetail,
-    TableKind, TableSummary,
+    ColumnSummary, DbError, ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects,
+    SchemaSummary, TableDetail, TableKind, TableSummary,
 };
 use std::collections::BTreeMap;
 use tiberius::{Row, ToSql};
@@ -218,9 +218,39 @@ pub(crate) async fn load_table_detail(
         .map(|row| ForeignKeyInfo {
             constraint_name: text(row, 0),
             column_name: text(row, 1),
-            ref_schema: text(row, 2),
-            ref_table: text(row, 3),
+            ref_schema: database.to_string(),
+            ref_table: format!("{}.{}", text(row, 2), text(row, 3)),
             ref_column: text(row, 4),
+            update_rule: text(row, 5),
+            delete_rule: text(row, 6),
+        })
+        .collect();
+
+    let inbound_foreign_key_rows = fetch_rows(
+        client,
+        &format!(
+            "SELECT fk.name, ps.name, pt.name, pc.name, rc.name, \
+                    fk.update_referential_action_desc, fk.delete_referential_action_desc \
+             FROM {db}.sys.foreign_keys fk \
+             JOIN {db}.sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+             JOIN {db}.sys.objects pt ON pt.object_id = fkc.parent_object_id \
+             JOIN {db}.sys.schemas ps ON ps.schema_id = pt.schema_id \
+             JOIN {db}.sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+             JOIN {db}.sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+             WHERE fk.referenced_object_id = @P1 ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id"
+        ),
+        &[&object_id],
+    )
+    .await
+    .unwrap_or_default();
+    let inbound_foreign_keys = inbound_foreign_key_rows
+        .iter()
+        .map(|row| InboundForeignKeyInfo {
+            constraint_name: text(row, 0),
+            source_schema: database.to_string(),
+            source_table: format!("{}.{}", text(row, 1), text(row, 2)),
+            source_column: text(row, 3),
+            target_column: text(row, 4),
             update_rule: text(row, 5),
             delete_rule: text(row, 6),
         })
@@ -247,6 +277,7 @@ pub(crate) async fn load_table_detail(
         row_estimate,
         indexes: indexes.into_values().collect(),
         foreign_keys,
+        inbound_foreign_keys,
     })
 }
 

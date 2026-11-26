@@ -44,6 +44,8 @@ impl CottonDataApp {
                         s.runtime = None;
                     }
                     self.catalogs[slot.index()] = None;
+                    self.table_details.retain(|(s, _, _), _| *s != slot.index());
+                    self.table_details_loading.retain(|(s, _, _)| *s != slot.index());
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
                     self.clear_slot_activity(slot);
@@ -60,6 +62,8 @@ impl CottonDataApp {
                         )
                     });
                     self.catalogs[slot.index()] = None;
+                    self.table_details.retain(|(s, _, _), _| *s != slot.index());
+                    self.table_details_loading.retain(|(s, _, _)| *s != slot.index());
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
                     self.clear_slot_activity(slot);
@@ -107,14 +111,25 @@ impl CottonDataApp {
                     self.catalogs[slot.index()] = Some(catalog);
                     self.slot_activity[slot.index()].loading_schemas.clear();
                 }
-                WorkerEvent::TableDetailLoaded { schema, table, detail } => {
+                WorkerEvent::TableDetailLoaded {
+                    slot,
+                    schema,
+                    table,
+                    detail,
+                    show_in_inspector,
+                } => {
                     for activity in &mut self.slot_activity {
                         if activity.is_loading_table_detail(&schema, &table) {
                             activity.loading_table_detail = None;
                         }
                     }
-                    self.ddl_view = Some((schema, table, detail));
-                    self.bottom_tab = BottomDeckTab::DdlInspector;
+                    let key = (slot.index(), schema.to_ascii_lowercase(), table.to_ascii_lowercase());
+                    self.table_details_loading.remove(&key);
+                    self.table_details.insert(key, detail.clone());
+                    if show_in_inspector {
+                        self.ddl_view = Some((schema, table, detail));
+                        self.bottom_tab = BottomDeckTab::DdlInspector;
+                    }
                 }
                 WorkerEvent::QueryFinished {
                     slot,
@@ -141,6 +156,7 @@ impl CottonDataApp {
                     if schema_changed {
                         self.mark_session_dirty();
                     }
+                    let mut preload_fk_target: Option<(String, String)> = None;
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_running = false;
                         tab.mutator.revert_all();
@@ -148,6 +164,16 @@ impl CottonDataApp {
                         tab.selected_cell = None;
                         match outcome {
                             QueryOutcome::Rows(page) => {
+                                if let Some((s, t)) = &tab.bound_table {
+                                    preload_fk_target = Some((s.clone(), t.clone()));
+                                } else if let Some(first) = page.columns.iter().find(|c| c.table.is_some()) {
+                                    if let (Some(t), Some(s)) = (
+                                        first.table.clone(),
+                                        first.schema.clone().or_else(|| cur_schema.clone()),
+                                    ) {
+                                        preload_fk_target = Some((s, t));
+                                    }
+                                }
                                 let bytes = page.approx_bytes();
                                 let more = if page.has_more_rows { "+" } else { "" };
                                 tab.last_status_msg = format!(
@@ -196,6 +222,9 @@ impl CottonDataApp {
                                 tab.record_view = None;
                                 tab.diff_rows = None;
                                 self.evict_pages(&evicted);
+                                if let Some((fk_schema, fk_table)) = preload_fk_target {
+                                    self.ensure_table_detail_loaded(slot, &fk_schema, &fk_table);
+                                }
                             }
                             QueryOutcome::Affected {
                                 affected_rows,

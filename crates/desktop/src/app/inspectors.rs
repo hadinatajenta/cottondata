@@ -105,6 +105,31 @@ impl CottonDataApp {
                     );
                 }
             }
+            if !detail.inbound_foreign_keys.is_empty() {
+                ui.add_space(6.0);
+                ui.label(icon_text(
+                    icon::ARROW_U_UP_LEFT,
+                    p.icon_table,
+                    &format!("Referenced by ({})", detail.inbound_foreign_keys.len()),
+                    p.text_primary,
+                    13.0,
+                ));
+                for fk in &detail.inbound_foreign_keys {
+                    ui.label(
+                        RichText::new(format!(
+                            "  {} : {}.{}.{} -> {} (ON UPDATE {}, ON DELETE {})",
+                            fk.constraint_name,
+                            fk.source_schema,
+                            fk.source_table,
+                            fk.source_column,
+                            fk.target_column,
+                            fk.update_rule,
+                            fk.delete_rule
+                        ))
+                        .font(FontId::new(11.5, FontFamily::Monospace)),
+                    );
+                }
+            }
         });
     }
 

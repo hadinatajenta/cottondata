@@ -28,6 +28,23 @@ impl CottonDataApp {
         self.handle_table_shortcuts(ui.ctx(), &editability);
         let mut pending_action = None;
         let active_tab = &self.tabs[self.active_tab_idx];
+        let active_slot_for_fk = active_tab.slot.or(self.active_slot);
+        let fk_target = bound_table.clone().or_else(|| {
+            let page = active_tab.page.as_ref()?;
+            let first = page.columns.iter().find(|c| c.table.is_some())?;
+            let table = first.table.clone()?;
+            let schema = first.schema.clone().or_else(|| {
+                active_slot_for_fk
+                    .and_then(|s| self.registry.get(s))
+                    .and_then(|sl| sl.runtime.as_ref())
+                    .and_then(|r| r.current_schema.clone())
+            })?;
+            Some((schema, table))
+        });
+        let cached_detail = active_slot_for_fk
+            .zip(fk_target.as_ref())
+            .and_then(|(slot, (schema, table))| self.cached_table_detail(slot, schema, table))
+            .cloned();
         let has_record_view = active_tab.record_view.is_some() && active_tab.page.is_some();
         let has_selected = !has_record_view && active_tab.selected_cell.is_some() && active_tab.is_inspector_open;
         let side_w = if has_record_view {
@@ -70,6 +87,7 @@ impl CottonDataApp {
                         order_by: tab.filter_sort.order_by.as_ref(),
                         is_sortable,
                         editability: &editability,
+                        table_detail: cached_detail.as_ref(),
                     };
                     let interaction = render_result_table(ui, &view, tab.inline_editor.as_mut());
                     if let Some((col_idx, new_w)) = interaction.resized_column {

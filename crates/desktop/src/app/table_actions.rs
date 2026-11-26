@@ -356,6 +356,15 @@ impl CottonDataApp {
             TableAction::QuickFilterValue { row, column, negate } => {
                 self.apply_quick_filter_by_cell(row, column, negate);
             }
+            TableAction::NavigateFk {
+                target_schema,
+                target_table,
+                target_column,
+                row,
+                column,
+            } => {
+                self.navigate_foreign_key(target_schema, target_table, target_column, row, column);
+            }
             TableAction::CopyColumnAsIn { row, column } => {
                 self.copy_column_as_in_clause(ctx, row, column);
             }
@@ -402,6 +411,38 @@ impl CottonDataApp {
             tab.filter_sort.page_index = 0;
             self.send_reload_active_table_page();
         }
+    }
+
+    fn navigate_foreign_key(
+        &mut self,
+        target_schema: String,
+        target_table: String,
+        target_column: String,
+        row: usize,
+        column: usize,
+    ) {
+        let Some(slot) = self.tabs[self.active_tab_idx].slot.or(self.active_slot) else {
+            return;
+        };
+        let dialect = self.slot_dialect(Some(slot));
+        let where_clause = {
+            let tab = &self.tabs[self.active_tab_idx];
+            let Some(page) = &tab.page else {
+                return;
+            };
+            let Some(col) = page.columns.get(column) else {
+                return;
+            };
+            let val = tab.cell_value(row, column).unwrap_or(CellValue::Null);
+            let target_ident = dialect.quote_ident(&target_column);
+            if val.is_null() {
+                format!("{target_ident} IS NULL")
+            } else {
+                let literal = cottondata_grid::mutator::format_sql_literal(dialect, &val, col.is_numeric);
+                format!("{target_ident} = {literal}")
+            }
+        };
+        self.open_filtered_table_tab(slot, target_schema, target_table, where_clause);
     }
 
     fn copy_column_as_in_clause(&mut self, ctx: &egui::Context, row: usize, column: usize) {

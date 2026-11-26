@@ -62,6 +62,17 @@ pub struct ForeignKeyInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundForeignKeyInfo {
+    pub constraint_name: String,
+    pub source_schema: String,
+    pub source_table: String,
+    pub source_column: String,
+    pub target_column: String,
+    pub update_rule: String,
+    pub delete_rule: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDetail {
     pub ddl: String,
     pub engine: Option<String>,
@@ -69,4 +80,5 @@ pub struct TableDetail {
     pub row_estimate: Option<u64>,
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<ForeignKeyInfo>,
+    pub inbound_foreign_keys: Vec<InboundForeignKeyInfo>,
 }

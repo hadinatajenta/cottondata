@@ -122,7 +122,14 @@ impl CottonDataApp {
             if !activity.is_loading_table_detail(&schema, &table) {
                 activity.loading_table_detail = Some((schema.clone(), table.clone()));
                 self.bottom_tab = BottomDeckTab::DdlInspector;
-                self.hub.send(slot_id, SlotCmd::LoadTableL2 { schema, table });
+                self.hub.send(
+                    slot_id,
+                    SlotCmd::LoadTableL2 {
+                        schema,
+                        table,
+                        show_in_inspector: true,
+                    },
+                );
             }
         }
         if let Some((schema, table)) = requests.generate_select {

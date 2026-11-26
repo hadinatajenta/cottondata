@@ -5,6 +5,7 @@ mod grid_table;
 mod inspectors;
 mod modals;
 mod navigator;
+mod params_modal;
 mod query_actions;
 mod query_tab;
 mod record_view;
@@ -27,11 +28,13 @@ use activity::SlotActivity;
 use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_driver::{ProcessEntry, ServerHealthMetrics};
+use cottondata_sql::ParamBinding;
 use cottondata_storage::{
     AppStorage, ConnectedServerState, QueryHistoryItem, SessionTabState, SessionsStore, SnippetScopeFilter,
     SnippetsStore,
 };
 use eframe::egui;
+use params_modal::ParamModalState;
 use query_tab::{BottomDeckTab, QueryTab};
 use server_form::ServerModalState;
 use sessions::SessionModalState;
@@ -108,6 +111,8 @@ pub struct CottonDataApp {
     active_slot: Option<ServerSlotId>,
     hub: WorkerHub,
     catalogs: [Option<SchemaCatalog>; SERVER_SLOT_CAPACITY],
+    table_details: HashMap<(usize, String, String), TableDetail>,
+    table_details_loading: HashSet<(usize, String, String)>,
     processlists: [Vec<ProcessEntry>; SERVER_SLOT_CAPACITY],
     health: [Option<ServerHealthMetrics>; SERVER_SLOT_CAPACITY],
     ddl_view: Option<(String, String, TableDetail)>,
@@ -126,6 +131,8 @@ pub struct CottonDataApp {
     snippet_folder_filter: Option<String>,
     snippet_scope_filter: SnippetScopeFilter,
     snippet_modal: Option<SnippetModalState>,
+    param_modal: Option<ParamModalState>,
+    param_history: HashMap<u64, HashMap<String, ParamBinding>>,
     modal: Option<ServerModalState>,
     session_modal: Option<SessionModalState>,
     settings_modal: Option<SettingsModalState>,
@@ -176,6 +183,8 @@ impl CottonDataApp {
             active_slot,
             hub,
             catalogs: std::array::from_fn(|_| None),
+            table_details: HashMap::new(),
+            table_details_loading: HashSet::new(),
             processlists: std::array::from_fn(|_| Vec::new()),
             health: std::array::from_fn(|_| None),
             ddl_view: None,
@@ -194,6 +203,8 @@ impl CottonDataApp {
             snippet_folder_filter: None,
             snippet_scope_filter: SnippetScopeFilter::All,
             snippet_modal: None,
+            param_modal: None,
+            param_history: HashMap::new(),
             modal: None,
             session_modal: None,
             settings_modal: None,
@@ -394,11 +405,43 @@ impl CottonDataApp {
         self.persist_sessions_now();
     }
 
+    pub(super) fn cached_table_detail(&self, slot: ServerSlotId, schema: &str, table: &str) -> Option<&TableDetail> {
+        let key = (slot.index(), schema.to_ascii_lowercase(), table.to_ascii_lowercase());
+        self.table_details.get(&key)
+    }
+
+    pub(super) fn ensure_table_detail_loaded(&mut self, slot: ServerSlotId, schema: &str, table: &str) {
+        if schema.is_empty() || table.is_empty() {
+            return;
+        }
+        let key = (slot.index(), schema.to_ascii_lowercase(), table.to_ascii_lowercase());
+        if self.table_details.contains_key(&key) || self.table_details_loading.contains(&key) {
+            return;
+        }
+        let is_connected = self
+            .registry
+            .get(slot)
+            .is_some_and(|s| matches!(s.status, ConnectionStatus::Connected));
+        if !is_connected {
+            return;
+        }
+        self.table_details_loading.insert(key);
+        self.hub.send(
+            slot,
+            SlotCmd::LoadTableL2 {
+                schema: schema.to_string(),
+                table: table.to_string(),
+                show_in_inspector: false,
+            },
+        );
+    }
+
     pub(super) fn is_any_modal_open(&self) -> bool {
         self.modal.is_some()
             || self.session_modal.is_some()
             || self.settings_modal.is_some()
             || self.snippet_modal.is_some()
+            || self.param_modal.is_some()
             || self.sql_preview_modal.is_some()
             || self.unsaved_guard_modal.is_some()
             || self.tabs[self.active_tab_idx].diff_rows.is_some()

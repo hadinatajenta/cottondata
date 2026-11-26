@@ -25,6 +25,7 @@ pub enum SlotCmd {
     LoadTableL2 {
         schema: String,
         table: String,
+        show_in_inspector: bool,
     },
     ExecuteSql {
         tab_id: u64,
@@ -98,9 +99,11 @@ pub enum WorkerEvent {
         catalog: SchemaCatalog,
     },
     TableDetailLoaded {
+        slot: ServerSlotId,
         schema: String,
         table: String,
         detail: TableDetail,
+        show_in_inspector: bool,
     },
     QueryFinished {
         slot: ServerSlotId,
@@ -463,7 +466,11 @@ fn slot_worker_loop(
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
             }
-            SlotCmd::LoadTableL2 { schema, table } => {
+            SlotCmd::LoadTableL2 {
+                schema,
+                table,
+                show_in_inspector,
+            } => {
                 let Some(sess) = session.as_mut() else {
                     emit_not_connected(&tx, &ctx, slot, None);
                     continue;
@@ -473,12 +480,18 @@ fn slot_worker_loop(
                         &tx,
                         &ctx,
                         WorkerEvent::TableDetailLoaded {
+                            slot,
                             schema,
                             table,
                             detail,
+                            show_in_inspector,
                         },
                     ),
-                    Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
+                    Err(error) => {
+                        if show_in_inspector {
+                            emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error });
+                        }
+                    }
                 }
             }
             SlotCmd::ExecuteSql { tab_id, sql, max_rows } => {

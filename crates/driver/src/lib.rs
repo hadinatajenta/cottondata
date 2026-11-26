@@ -3,8 +3,8 @@ mod error;
 mod tunnel;
 
 pub use catalog::{
-    ColumnSummary, ForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects, SchemaSummary, TableDetail, TableKind,
-    TableSummary,
+    ColumnSummary, ForeignKeyInfo, InboundForeignKeyInfo, IndexInfo, RoutineSummary, SchemaObjects, SchemaSummary,
+    TableDetail, TableKind, TableSummary,
 };
 pub use error::DbError;
 pub use tunnel::SshTunnel;

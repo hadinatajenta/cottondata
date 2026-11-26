@@ -159,8 +159,11 @@ pub(super) fn paint_cell(
         ui.painter().rect_filled(cell_rect, 0.0, display.background);
     }
 
+    let has_outbound_fk = !display.is_null && row < view.page.row_count && view.outbound_fk_for_column(column).is_some();
     let text_color = if display.is_null {
         palette.text_muted
+    } else if has_outbound_fk {
+        palette.accent
     } else {
         palette.text_primary
     };
@@ -179,11 +182,17 @@ pub(super) fn paint_cell(
     } else {
         cell_rect.left() + CELL_PADDING_X
     };
-    ui.painter().galley(
-        egui::pos2(text_x, cell_rect.center().y - galley.size().y / 2.0),
-        galley,
-        text_color,
-    );
+    let text_y = cell_rect.center().y - galley.size().y / 2.0;
+    let galley_w = galley.size().x;
+    let galley_h = galley.size().y;
+    ui.painter().galley(egui::pos2(text_x, text_y), galley, text_color);
+    if has_outbound_fk {
+        ui.painter().hline(
+            text_x..=(text_x + galley_w),
+            text_y + galley_h - 0.5,
+            Stroke::new(1.0, palette.accent.gamma_multiply(0.45)),
+        );
+    }
 
     if is_focused {
         ui.painter().rect_stroke(
