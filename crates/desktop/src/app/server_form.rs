@@ -1,7 +1,10 @@
-use cottondata_core::{ConnectionEndpoint, EnvironmentTag, ServerProfile, ServerSlotId, SshTunnelConfig, TlsMode};
+use cottondata_core::{
+    ConnectionEndpoint, DatabaseEngine, EnvironmentTag, ServerProfile, ServerSlotId, SshTunnelConfig, TlsMode,
+};
 
 pub(super) struct ServerModalState {
     pub(super) editing_slot: Option<ServerSlotId>,
+    pub(super) engine: DatabaseEngine,
     pub(super) name: String,
     pub(super) use_unix_socket: bool,
     pub(super) host: String,
@@ -28,6 +31,7 @@ impl ServerModalState {
     pub(super) fn new_empty() -> Self {
         Self {
             editing_slot: None,
+            engine: DatabaseEngine::MySql,
             name: String::new(),
             use_unix_socket: false,
             host: "127.0.0.1".into(),
@@ -58,6 +62,7 @@ impl ServerModalState {
         };
         Self {
             editing_slot: Some(slot),
+            engine: p.engine,
             name: p.name.clone(),
             use_unix_socket,
             host,
@@ -82,7 +87,7 @@ impl ServerModalState {
     }
 
     pub(super) fn build_profile(&self, existing_id: Option<String>) -> Result<ServerProfile, String> {
-        let endpoint = if self.use_unix_socket {
+        let endpoint = if self.use_unix_socket && self.engine.supports_unix_socket() {
             ConnectionEndpoint::UnixSocket {
                 path: self.socket_path.trim().to_string(),
             }
@@ -121,6 +126,7 @@ impl ServerModalState {
 
         let profile = ServerProfile {
             id,
+            engine: self.engine,
             name: self.name.trim().to_string(),
             endpoint,
             username: self.username.trim().to_string(),

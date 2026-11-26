@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/core",
+    "crates/driver",
     "crates/mysql",
     "crates/introspect",
     "crates/sql",
@@ -14,13 +15,14 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Hadinata <hadinata.jenta@sharingvision.co.id>"]
 repository = "https://github.com/hadinatajenta/cottondata"
 
 [workspace.dependencies]
 cottondata-core = { path = "crates/core" }
+cottondata-driver = { path = "crates/driver" }
 cottondata-mysql = { path = "crates/mysql" }
 cottondata-introspect = { path = "crates/introspect" }
 cottondata-sql = { path = "crates/sql" }

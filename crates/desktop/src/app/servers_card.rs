@@ -4,7 +4,7 @@ use crate::theme::{Palette, GUTTER, RADIUS_CONTROL};
 use crate::ui_kit::{
     caption, card_frame, icon, icon_button, icon_text, pill, secondary_button, section_title, status_dot,
 };
-use cottondata_core::{ConnectionStatus, ServerSlot, ServerSlotId, MAX_SERVERS};
+use cottondata_core::{ConnectionStatus, ServerSlot, ServerSlotId};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Sense};
 
 const SERVER_LIST_MAX_HEIGHT: f32 = 220.0;
@@ -48,7 +48,7 @@ impl CottonDataApp {
     fn render_servers_card(&mut self, ui: &mut egui::Ui, palette: Palette) {
         ui.horizontal(|ui| {
             section_title(ui, palette, icon::PLUGS, "Servers");
-            caption(ui, palette, format!("{}/{}", self.registry.count(), MAX_SERVERS));
+            caption(ui, palette, format!("{}/{}", self.registry.count(), self.registry.max_servers()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_add = !self.registry.is_full();
                 let add_clicked = ui

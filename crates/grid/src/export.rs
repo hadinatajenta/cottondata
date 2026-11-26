@@ -1,5 +1,6 @@
 use crate::mutator::format_sql_literal;
-use crate::page::{escape_ident, ColumnarPage};
+use crate::page::ColumnarPage;
+use cottondata_core::SqlDialect;
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +46,25 @@ impl ExportFormat {
     }
 }
 
+pub struct SqlInsertTarget<'a> {
+    pub dialect: SqlDialect,
+    pub table_name: &'a str,
+}
+
+impl SqlInsertTarget<'_> {
+    pub fn mysql(table_name: &str) -> SqlInsertTarget<'_> {
+        SqlInsertTarget {
+            dialect: SqlDialect::MySql,
+            table_name,
+        }
+    }
+}
+
 pub fn export_rows<W: Write>(
     page: &ColumnarPage,
     rows: &[usize],
     format: ExportFormat,
-    table_name: &str,
+    target: &SqlInsertTarget,
     writer: &mut W,
 ) -> io::Result<()> {
     let rows: Vec<usize> = rows.iter().copied().filter(|&row| row < page.row_count).collect();
@@ -58,24 +73,24 @@ pub fn export_rows<W: Write>(
         ExportFormat::Tsv => write_delimited(page, &rows, b'\t', writer),
         ExportFormat::JsonLines => write_json_lines(page, &rows, writer),
         ExportFormat::JsonArray => write_json_array(page, &rows, writer),
-        ExportFormat::SqlInserts => write_sql_inserts(page, &rows, table_name, writer),
+        ExportFormat::SqlInserts => write_sql_inserts(page, &rows, target, writer),
     }
 }
 
 pub fn export_csv<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
-    export_rows(page, &all_rows(page), ExportFormat::Csv, "", writer)
+    export_rows(page, &all_rows(page), ExportFormat::Csv, &SqlInsertTarget::mysql(""), writer)
 }
 
 pub fn export_json_lines<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
-    export_rows(page, &all_rows(page), ExportFormat::JsonLines, "", writer)
+    export_rows(page, &all_rows(page), ExportFormat::JsonLines, &SqlInsertTarget::mysql(""), writer)
 }
 
 pub fn export_json_array<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
-    export_rows(page, &all_rows(page), ExportFormat::JsonArray, "", writer)
+    export_rows(page, &all_rows(page), ExportFormat::JsonArray, &SqlInsertTarget::mysql(""), writer)
 }
 
 pub fn export_sql_inserts<W: Write>(page: &ColumnarPage, table_name: &str, writer: &mut W) -> io::Result<()> {
-    export_rows(page, &all_rows(page), ExportFormat::SqlInserts, table_name, writer)
+    export_rows(page, &all_rows(page), ExportFormat::SqlInserts, &SqlInsertTarget::mysql(table_name), writer)
 }
 
 fn all_rows(page: &ColumnarPage) -> Vec<usize> {
@@ -168,32 +183,30 @@ fn to_json_value(cell: Option<&str>, is_numeric: bool) -> serde_json::Value {
 fn write_sql_inserts<W: Write>(
     page: &ColumnarPage,
     rows: &[usize],
-    table_name: &str,
+    target: &SqlInsertTarget,
     writer: &mut W,
 ) -> io::Result<()> {
     if rows.is_empty() || page.columns.is_empty() {
         return Ok(());
     }
+    let dialect = target.dialect;
     let column_list = page
         .columns
         .iter()
-        .map(|column| format!("`{}`", escape_ident(&column.name)))
+        .map(|column| dialect.quote_ident(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let escaped_table = escape_ident(table_name);
+    let quoted_table = dialect.quote_ident(target.table_name);
 
     for &row in rows {
         let values = page
             .columns
             .iter()
             .enumerate()
-            .map(|(column_index, meta)| format_sql_literal(&page.cell_value(row, column_index), meta.is_numeric))
+            .map(|(column_index, meta)| format_sql_literal(dialect, &page.cell_value(row, column_index), meta.is_numeric))
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(
-            writer,
-            "INSERT INTO `{escaped_table}` ({column_list}) VALUES ({values});"
-        )?;
+        writeln!(writer, "INSERT INTO {quoted_table} ({column_list}) VALUES ({values});")?;
     }
     Ok(())
 }
@@ -229,7 +242,7 @@ mod tests {
 
     fn render(rows: &[usize], format: ExportFormat) -> String {
         let mut buffer = Vec::new();
-        export_rows(&sample_page(), rows, format, "users", &mut buffer).expect("export succeeds");
+        export_rows(&sample_page(), rows, format, &SqlInsertTarget::mysql("users"), &mut buffer).expect("export succeeds");
         String::from_utf8(buffer).expect("utf8 output")
     }
 
@@ -282,6 +295,20 @@ mod tests {
         assert!(
             output.starts_with("INSERT INTO `users` (`id`, `note`) VALUES (3, NULL);"),
             "{output}"
+        );
+    }
+
+    #[test]
+    fn sql_inserts_follow_target_dialect_quoting() {
+        let mut buffer = Vec::new();
+        let target = SqlInsertTarget {
+            dialect: SqlDialect::SqlServer,
+            table_name: "users",
+        };
+        export_rows(&sample_page(), &[0], ExportFormat::SqlInserts, &target, &mut buffer).expect("export succeeds");
+        assert_eq!(
+            String::from_utf8(buffer).expect("utf8"),
+            "INSERT INTO [users] ([id], [note]) VALUES (1, N'plain');\n"
         );
     }
 

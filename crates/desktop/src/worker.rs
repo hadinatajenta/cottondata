@@ -1,9 +1,8 @@
-use cottondata_core::{ServerProfile, ServerRuntimeInfo, ServerSlotId, MAX_SERVERS};
+use crate::drivers::{kill_running_query, open_session};
+use cottondata_core::{ServerProfile, ServerRuntimeInfo, ServerSlotId, SERVER_SLOT_CAPACITY};
 use cottondata_grid::PageFilterSort;
 use cottondata_introspect::{SchemaCatalog, TableDetail};
-use cottondata_mysql::{
-    ExplainResult, MySqlError, MySqlSession, ProcessEntry, QueryOutcome, ServerHealthMetrics,
-};
+use cottondata_driver::{DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, ServerHealthMetrics};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -73,7 +72,7 @@ pub enum WorkerEvent {
     Error {
         slot: ServerSlotId,
         tab_id: Option<u64>,
-        error: MySqlError,
+        error: DbError,
     },
     CatalogUpdated {
         slot: ServerSlotId,
@@ -124,7 +123,7 @@ struct SlotWorker {
 }
 
 pub struct WorkerHub {
-    workers: [Option<SlotWorker>; MAX_SERVERS],
+    workers: [Option<SlotWorker>; SERVER_SLOT_CAPACITY],
     event_tx: Sender<WorkerEvent>,
     event_rx: Receiver<WorkerEvent>,
     repaint_ctx: Option<egui::Context>,
@@ -157,7 +156,7 @@ impl WorkerHub {
                 .name(format!("cottondata-slot-{}", slot.display_number()))
                 .stack_size(1024 * 1024)
                 .spawn(move || slot_worker_loop(slot, cmd_rx, ev_tx, ctx))
-                .expect("spawn mysql slot worker");
+                .expect("spawn database slot worker");
             self.workers[idx] = Some(SlotWorker {
                 tx: cmd_tx,
                 _handle: handle,
@@ -181,11 +180,7 @@ impl WorkerHub {
             .name("cottondata-kill".into())
             .stack_size(512 * 1024)
             .spawn(move || {
-                if let Err(err) = MySqlSession::kill_query_via_aux(
-                    &profile,
-                    password.as_deref(),
-                    target_conn_id,
-                ) {
+                if let Err(err) = kill_running_query(&profile, password.as_deref(), target_conn_id) {
                     let _ = ev_tx.send(WorkerEvent::Error {
                         slot,
                         tab_id: None,
@@ -221,7 +216,7 @@ fn emit_not_connected(tx: &Sender<WorkerEvent>, ctx: &Option<egui::Context>, slo
         WorkerEvent::Error {
             slot,
             tab_id,
-            error: MySqlError::message("Not connected to this server"),
+            error: DbError::message("Not connected to this server"),
         },
     );
 }
@@ -232,7 +227,7 @@ fn slot_worker_loop(
     tx: Sender<WorkerEvent>,
     ctx: Option<egui::Context>,
 ) {
-    let mut session: Option<MySqlSession> = None;
+    let mut session: Option<Box<dyn DatabaseSession>> = None;
     let mut catalog = SchemaCatalog::new();
 
     while let Ok(cmd) = rx.recv() {
@@ -240,16 +235,16 @@ fn slot_worker_loop(
             SlotCmd::Connect { profile, password } => {
                 session = None;
                 catalog = SchemaCatalog::new();
-                match MySqlSession::connect(&profile, password.as_deref()) {
+                match open_session(&profile, password.as_deref()) {
                     Ok(mut sess) => {
-                        if let Err(err) = catalog.introspect_l0(&mut sess) {
+                        if let Err(err) = catalog.introspect_l0(sess.as_mut()) {
                             emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: err });
                         }
                         if let Some(default_db) = sess.runtime().current_schema.clone() {
-                            let _ = catalog.introspect_schema_l1(&mut sess, &default_db);
+                            let _ = catalog.introspect_schema_l1(sess.as_mut(), &default_db);
                         }
                         let runtime = sess.runtime().clone();
-                        let snapshot = clone_catalog_light(&catalog, &mut sess);
+                        let snapshot = catalog.snapshot();
                         session = Some(sess);
                         emit(
                             &tx,
@@ -284,12 +279,12 @@ fn slot_worker_loop(
             }
             SlotCmd::LoadSchemaL1 { schema } => {
                 let Some(sess) = session.as_mut() else {
-                    emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: MySqlError::message("Not connected") });
+                    emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: DbError::message("Not connected") });
                     continue;
                 };
-                match catalog.introspect_schema_l1(sess, &schema) {
+                match catalog.introspect_schema_l1(sess.as_mut(), &schema) {
                     Ok(()) => {
-                        let snapshot = clone_catalog_light(&catalog, sess);
+                        let snapshot = catalog.snapshot();
                         emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: snapshot });
                     }
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
@@ -300,7 +295,7 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, None);
                     continue;
                 };
-                match catalog.introspect_table_l2(sess, &schema, &table) {
+                match catalog.introspect_table_l2(sess.as_mut(), &schema, &table) {
                     Ok(detail) => emit(
                         &tx,
                         &ctx,
@@ -315,7 +310,7 @@ fn slot_worker_loop(
             }
             SlotCmd::ExecuteSql { tab_id, sql, max_rows } => {
                 let Some(sess) = session.as_mut() else {
-                    emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error: MySqlError::message("Connect to this MySQL server first.") });
+                    emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error: DbError::message("Connect to this server first.") });
                     continue;
                 };
                 match sess.execute_sql(&sql, max_rows) {
@@ -333,7 +328,7 @@ fn slot_worker_loop(
                         );
                     }
                     Err(error) => {
-                        let lost = is_connection_lost(&error);
+                        let lost = error.is_connection_lost;
                         emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
                         if lost {
                             session = None;
@@ -353,7 +348,7 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, Some(tab_id));
                     continue;
                 };
-                let sql = filter_sort.build_select_sql(&schema, &table);
+                let sql = filter_sort.build_select_sql(sess.dialect(), &schema, &table);
                 match sess.execute_sql(&sql, filter_sort.page_size) {
                     Ok(outcome) => {
                         let runtime = sess.runtime().clone();
@@ -369,7 +364,7 @@ fn slot_worker_loop(
                         );
                     }
                     Err(error) => {
-                        let lost = is_connection_lost(&error);
+                        let lost = error.is_connection_lost;
                         emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
                         if lost {
                             session = None;
@@ -389,7 +384,7 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, Some(tab_id));
                     continue;
                 };
-                let sql = filter_sort.build_count_sql(&schema, &table);
+                let sql = filter_sort.build_count_sql(sess.dialect(), &schema, &table);
                 match sess.execute_sql(&sql, 1) {
                     Ok(QueryOutcome::Rows(page)) => {
                         let count = page
@@ -404,7 +399,7 @@ fn slot_worker_loop(
                         WorkerEvent::Error {
                             slot,
                             tab_id: Some(tab_id),
-                            error: MySqlError::message("Row count query returned no rows"),
+                            error: DbError::message("Row count query returned no rows"),
                         },
                     ),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
@@ -447,9 +442,9 @@ fn slot_worker_loop(
                 };
                 match sess.set_schema(&schema) {
                     Ok(()) => {
-                        let _ = catalog.introspect_schema_l1(sess, &schema);
+                        let _ = catalog.introspect_schema_l1(sess.as_mut(), &schema);
                         let runtime = sess.runtime().clone();
-                        let snapshot = clone_catalog_light(&catalog, sess);
+                        let snapshot = catalog.snapshot();
                         emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime });
                         emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: snapshot });
                     }
@@ -533,21 +528,4 @@ fn slot_worker_loop(
             }
         }
     }
-}
-
-fn clone_catalog_light(catalog: &SchemaCatalog, _sess: &mut MySqlSession) -> SchemaCatalog {
-    catalog.snapshot()
-}
-
-fn is_connection_lost(err: &MySqlError) -> bool {
-    if matches!(err.diagnostic.code, Some(2006) | Some(2013)) {
-        return true;
-    }
-    let lower = err.diagnostic.raw_message.to_ascii_lowercase();
-    lower.contains("server has gone away")
-        || lower.contains("lost connection")
-        || lower.contains("broken pipe")
-        || lower.contains("connection reset")
-        || lower.contains("unexpected eof")
-        || lower.contains("closed connection")
 }

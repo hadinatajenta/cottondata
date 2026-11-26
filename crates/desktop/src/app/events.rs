@@ -2,7 +2,7 @@ use super::query_tab::BottomDeckTab;
 use super::CottonDataApp;
 use crate::worker::{SlotCmd, WorkerEvent};
 use cottondata_core::ConnectionStatus;
-use cottondata_mysql::QueryOutcome;
+use cottondata_driver::QueryOutcome;
 use cottondata_storage::ConnectedServerState;
 
 impl CottonDataApp {

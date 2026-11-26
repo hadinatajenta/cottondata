@@ -4,7 +4,7 @@ use super::CottonDataApp;
 use crate::theme::{AppTheme, Palette, GUTTER};
 use crate::ui_kit::{card_frame, ghost_button, icon, icon_button, icon_text, pill, primary_button, toolbar_divider};
 use crate::worker::SlotCmd;
-use cottondata_core::{ServerSlotId, MAX_SERVERS};
+use cottondata_core::ServerSlotId;
 use eframe::egui::{self, Color32, Margin, RichText};
 
 const LABELED_TOOLBAR_MIN_WIDTH: f32 = 1180.0;
@@ -99,7 +99,7 @@ impl CottonDataApp {
     }
 
     fn render_connection_group(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        let add_label = format!("Server {}/{}", self.registry.count(), MAX_SERVERS);
+        let add_label = format!("Server {}/{}", self.registry.count(), self.registry.max_servers());
         if primary_button(ui, palette, icon::PLUS, &add_label, !self.registry.is_full())
             .on_hover_text("Add a MySQL server")
             .clicked()
@@ -113,6 +113,9 @@ impl CottonDataApp {
         };
         if icon_button(ui, palette, theme_glyph, "Switch theme").clicked() {
             self.toggle_theme(ui.ctx());
+        }
+        if icon_button(ui, palette, icon::GEAR_SIX, "Settings").clicked() {
+            self.open_settings();
         }
         toolbar_divider(ui, palette);
 

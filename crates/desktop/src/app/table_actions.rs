@@ -1,7 +1,7 @@
 use super::result_table::TableAction;
 use super::row_selection::RowSelectMode;
 use super::CottonDataApp;
-use cottondata_grid::{export_rows, ExportFormat};
+use cottondata_grid::{export_rows, ExportFormat, SqlInsertTarget};
 use eframe::egui;
 
 const CLIPBOARD_ROW_FORMAT: ExportFormat = ExportFormat::Tsv;
@@ -33,7 +33,11 @@ impl CottonDataApp {
     }
 
     pub(super) fn handle_table_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.modal.is_some() || self.sql_preview_modal.is_some() {
+        if ctx.wants_keyboard_input()
+            || self.modal.is_some()
+            || self.sql_preview_modal.is_some()
+            || self.settings_modal.is_some()
+        {
             return;
         }
         let (is_select_all, is_copy, is_escape) = ctx.input_mut(|input| {
@@ -72,6 +76,7 @@ impl CottonDataApp {
     }
 
     fn copy_selected_rows(&mut self, ctx: &egui::Context, format: ExportFormat) {
+        let dialect = self.slot_dialect(self.tabs[self.active_tab_idx].slot);
         let tab = &mut self.tabs[self.active_tab_idx];
         let Some(page) = &tab.page else {
             return;
@@ -82,7 +87,12 @@ impl CottonDataApp {
             return;
         }
         let mut buffer = Vec::new();
-        if let Err(err) = export_rows(page, &rows, format, &tab.insert_target_table(), &mut buffer) {
+        let target_table = tab.insert_target_table();
+        let target = SqlInsertTarget {
+            dialect,
+            table_name: &target_table,
+        };
+        if let Err(err) = export_rows(page, &rows, format, &target, &mut buffer) {
             self.toast_banner = Some((format!("Copy failed: {err}"), true));
             return;
         }

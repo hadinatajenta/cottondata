@@ -1,7 +1,9 @@
+use crate::dialect::DatabaseEngine;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const MAX_SERVERS: usize = 10;
+pub const SERVER_SLOT_CAPACITY: usize = 64;
+pub const DEFAULT_MAX_SERVERS: usize = 10;
 pub const MAX_SOCKETS_PER_SERVER: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -9,7 +11,7 @@ pub struct ServerSlotId(u8);
 
 impl ServerSlotId {
     pub fn new(index: usize) -> Option<Self> {
-        if index < MAX_SERVERS {
+        if index < SERVER_SLOT_CAPACITY {
             Some(Self(index as u8))
         } else {
             None
@@ -150,6 +152,8 @@ impl SshTunnelConfig {
 pub struct ServerProfile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub engine: DatabaseEngine,
     pub endpoint: ConnectionEndpoint,
     pub username: String,
     #[serde(default)]
@@ -196,6 +200,7 @@ impl ServerProfile {
         Self {
             id: format!("srv-{slug}-{port}"),
             name: name_str,
+            engine: DatabaseEngine::MySql,
             endpoint: ConnectionEndpoint::Tcp {
                 host: host.into(),
                 port,
@@ -331,9 +336,19 @@ impl fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ServerRegistry {
-    slots: [Option<ServerSlot>; MAX_SERVERS],
+    slots: [Option<ServerSlot>; SERVER_SLOT_CAPACITY],
+    max_servers: usize,
+}
+
+impl Default for ServerRegistry {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| None),
+            max_servers: DEFAULT_MAX_SERVERS,
+        }
+    }
 }
 
 impl ServerRegistry {
@@ -345,12 +360,32 @@ impl ServerRegistry {
         self.slots.iter().filter(|s| s.is_some()).count()
     }
 
+    pub fn max_servers(&self) -> usize {
+        self.max_servers
+    }
+
+    pub fn set_max_servers(&mut self, max_servers: usize) -> Result<(), RegistryError> {
+        if !(1..=SERVER_SLOT_CAPACITY).contains(&max_servers) {
+            return Err(RegistryError::InvalidProfile(format!(
+                "Maximum servers must be between 1 and {SERVER_SLOT_CAPACITY}"
+            )));
+        }
+        if max_servers < self.count() {
+            return Err(RegistryError::InvalidProfile(format!(
+                "Remove servers first: {} are configured, which is more than {max_servers}",
+                self.count()
+            )));
+        }
+        self.max_servers = max_servers;
+        Ok(())
+    }
+
     pub fn remaining_slots(&self) -> usize {
-        MAX_SERVERS - self.count()
+        self.max_servers.saturating_sub(self.count())
     }
 
     pub fn is_full(&self) -> bool {
-        self.count() >= MAX_SERVERS
+        self.count() >= self.max_servers
     }
 
     pub fn add(&mut self, profile: ServerProfile) -> Result<ServerSlotId, RegistryError> {
@@ -358,12 +393,15 @@ impl ServerRegistry {
         if self.slots.iter().flatten().any(|s| s.profile.name.eq_ignore_ascii_case(&profile.name)) {
             return Err(RegistryError::DuplicateName(profile.name));
         }
+        if self.is_full() {
+            return Err(RegistryError::SlotLimitReached { max: self.max_servers });
+        }
         let free_idx = self
             .slots
             .iter()
             .position(|slot| slot.is_none())
-            .ok_or(RegistryError::SlotLimitReached { max: MAX_SERVERS })?;
-        let slot_id = ServerSlotId::new(free_idx).expect("index within MAX_SERVERS");
+            .ok_or(RegistryError::SlotLimitReached { max: self.max_servers })?;
+        let slot_id = ServerSlotId::new(free_idx).expect("index within SERVER_SLOT_CAPACITY");
         self.slots[free_idx] = Some(ServerSlot {
             slot_id,
             profile,
@@ -413,11 +451,12 @@ impl ServerRegistry {
         self.iter().map(|s| s.profile.clone()).collect()
     }
 
-    pub fn from_profiles(profiles: Vec<ServerProfile>) -> Result<Self, RegistryError> {
-        if profiles.len() > MAX_SERVERS {
-            return Err(RegistryError::SlotLimitReached { max: MAX_SERVERS });
-        }
+    pub fn from_profiles(profiles: Vec<ServerProfile>, max_servers: usize) -> Result<Self, RegistryError> {
         let mut reg = Self::new();
+        reg.max_servers = max_servers.clamp(1, SERVER_SLOT_CAPACITY).max(profiles.len().min(SERVER_SLOT_CAPACITY));
+        if profiles.len() > SERVER_SLOT_CAPACITY {
+            return Err(RegistryError::SlotLimitReached { max: SERVER_SLOT_CAPACITY });
+        }
         for profile in profiles {
             reg.add(profile)?;
         }
@@ -432,7 +471,7 @@ mod tests {
     #[test]
     fn enforces_strict_ten_server_cap() {
         let mut reg = ServerRegistry::new();
-        for i in 1..=MAX_SERVERS {
+        for i in 1..=DEFAULT_MAX_SERVERS {
             let p = ServerProfile::new_local(format!("MySQL-{i}"), "127.0.0.1", 3306 + i as u16, "root");
             let id = reg.add(p).expect("slot should succeed");
             assert_eq!(id.display_number(), i);
@@ -445,6 +484,32 @@ mod tests {
             reg.add(eleventh),
             Err(RegistryError::SlotLimitReached { max: 10 })
         );
+    }
+
+    #[test]
+    fn user_limit_can_grow_up_to_capacity_but_not_below_configured_count() {
+        let mut reg = ServerRegistry::new();
+        for i in 1..=3 {
+            reg.add(ServerProfile::new_local(format!("db-{i}"), "127.0.0.1", 3306, "root"))
+                .unwrap();
+        }
+        assert!(reg.set_max_servers(2).is_err());
+        assert!(reg.set_max_servers(0).is_err());
+        assert!(reg.set_max_servers(SERVER_SLOT_CAPACITY + 1).is_err());
+        reg.set_max_servers(3).unwrap();
+        assert!(reg.is_full());
+        reg.set_max_servers(SERVER_SLOT_CAPACITY).unwrap();
+        assert_eq!(reg.remaining_slots(), SERVER_SLOT_CAPACITY - 3);
+    }
+
+    #[test]
+    fn loading_more_profiles_than_saved_limit_raises_limit_instead_of_dropping_servers() {
+        let profiles = (1..=5)
+            .map(|i| ServerProfile::new_local(format!("db-{i}"), "127.0.0.1", 3306, "root"))
+            .collect();
+        let reg = ServerRegistry::from_profiles(profiles, 2).unwrap();
+        assert_eq!(reg.count(), 5);
+        assert_eq!(reg.max_servers(), 5);
     }
 
     #[test]

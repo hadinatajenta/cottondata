@@ -20,7 +20,8 @@ impl CottonDataApp {
         let page_size = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = QueryTab::new_table(id, slot, schema.clone(), table.clone(), page_size);
+        let dialect = self.slot_dialect(Some(slot));
+        let tab = QueryTab::new_table(id, slot, dialect, schema.clone(), table.clone(), page_size);
         let filter_sort = tab.filter_sort.clone();
         self.tabs.push(tab);
         self.active_tab_idx = self.tabs.len() - 1;

@@ -680,6 +680,7 @@ name = "cottondata-cli"
 version = "0.1.0"
 dependencies = [
  "cottondata-core",
+ "cottondata-driver",
  "cottondata-grid",
  "cottondata-introspect",
  "cottondata-mysql",
@@ -701,6 +702,7 @@ name = "cottondata-desktop"
 version = "0.1.0"
 dependencies = [
  "cottondata-core",
+ "cottondata-driver",
  "cottondata-grid",
  "cottondata-introspect",
  "cottondata-mysql",
@@ -711,6 +713,14 @@ dependencies = [
  "mimalloc",
  "rfd",
  "winresource",
+]
+
+[[package]]
+name = "cottondata-driver"
+version = "0.1.0"
+dependencies = [
+ "cottondata-core",
+ "cottondata-grid",
 ]
 
 [[package]]
@@ -727,10 +737,9 @@ name = "cottondata-introspect"
 version = "0.1.0"
 dependencies = [
  "cottondata-core",
- "cottondata-mysql",
+ "cottondata-driver",
  "cottondata-sql",
  "lasso",
- "mysql",
 ]
 
 [[package]]
@@ -738,6 +747,7 @@ name = "cottondata-mysql"
 version = "0.1.0"
 dependencies = [
  "cottondata-core",
+ "cottondata-driver",
  "cottondata-grid",
  "cottondata-sql",
  "mysql",

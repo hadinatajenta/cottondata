@@ -1,7 +1,7 @@
 use super::row_selection::RowSelection;
-use cottondata_core::ServerSlotId;
+use cottondata_core::{ServerSlotId, SqlDialect};
 use cottondata_grid::{CellValue, ColumnarPage, PageFilterSort, SortDirection, StagedMutator};
-use cottondata_mysql::ExplainResult;
+use cottondata_driver::ExplainResult;
 use cottondata_storage::{SessionSortOrder, SessionTabState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,12 +66,19 @@ impl QueryTab {
         }
     }
 
-    pub(super) fn new_table(id: u64, slot: ServerSlotId, schema: String, table: String, page_size: u32) -> Self {
+    pub(super) fn new_table(
+        id: u64,
+        slot: ServerSlotId,
+        dialect: SqlDialect,
+        schema: String,
+        table: String,
+        page_size: u32,
+    ) -> Self {
         let filter_sort = PageFilterSort {
             page_size,
             ..Default::default()
         };
-        let sql = filter_sort.build_select_sql(&schema, &table);
+        let sql = filter_sort.build_select_sql(dialect, &schema, &table);
         Self {
             id,
             title: format!("{schema}.{table}"),

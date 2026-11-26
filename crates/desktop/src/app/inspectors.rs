@@ -126,12 +126,7 @@ impl CottonDataApp {
         let has_full_scan =
             exp.raw_output.contains("\"access_type\": \"ALL\"") || exp.raw_output.contains("Table scan");
         ui.horizontal(|ui| {
-            let kind = if exp.is_analyze {
-                "EXPLAIN ANALYZE"
-            } else {
-                "EXPLAIN FORMAT=JSON"
-            };
-            ui.label(icon_text(icon::CHART_BAR, p.accent, kind, p.text_primary, 13.0));
+            ui.label(icon_text(icon::CHART_BAR, p.accent, &exp.label, p.text_primary, 13.0));
             caption(ui, p, format!("{} ms", exp.elapsed_ms));
             if has_full_scan {
                 banner(
@@ -183,19 +178,10 @@ impl CottonDataApp {
             if is_refreshing {
                 busy_indicator(ui, p, "Refreshing…");
             }
-            if let Some(m) = &self.health[slot.index()] {
-                let hit = m
-                    .innodb_hit_ratio_pct
-                    .map(|v| format!("{v:.2}%"))
-                    .unwrap_or_else(|| "n/a".into());
-                ui.label(
-                    RichText::new(format!(
-                        "Uptime: {}s · Threads: {}/{} running · Questions: {} · InnoDB Hit: {}",
-                        m.uptime_secs, m.threads_running, m.threads_connected, m.questions, hit
-                    ))
-                    .size(11.5)
-                    .color(p.text_muted),
-                );
+            if let Some(health) = &self.health[slot.index()] {
+                for metric in &health.metrics {
+                    caption(ui, p, format!("{}: {}", metric.label, metric.value));
+                }
             }
         });
         ui.add_space(4.0);

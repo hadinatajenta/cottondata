@@ -2,7 +2,7 @@ use super::CottonDataApp;
 use crate::theme::Palette;
 use crate::ui_kit::{banner, icon, primary_button, secondary_button};
 use crate::worker::SlotCmd;
-use cottondata_core::{EnvironmentTag, TlsMode, MAX_SERVERS};
+use cottondata_core::{EnvironmentTag, TlsMode};
 use eframe::egui::{self, RichText};
 
 impl CottonDataApp {
@@ -62,7 +62,7 @@ impl CottonDataApp {
         let title = if let Some(slot) = state.editing_slot {
             format!("Edit MySQL Server ({slot})")
         } else {
-            format!("Add MySQL Server (Slot {}/{})", self.registry.count() + 1, MAX_SERVERS)
+            format!("Add Server (Slot {}/{})", self.registry.count() + 1, self.registry.max_servers())
         };
 
         egui::Window::new(title)

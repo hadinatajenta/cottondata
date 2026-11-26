@@ -5,7 +5,7 @@ use crate::ui_kit::{
     toolbar_divider,
 };
 use crate::worker::SlotCmd;
-use cottondata_grid::{export_rows, ExportFormat};
+use cottondata_grid::{export_rows, ExportFormat, SqlInsertTarget};
 use eframe::egui;
 use std::fs::File;
 use std::io::BufWriter;
@@ -136,8 +136,9 @@ impl CottonDataApp {
 
         if reload_page {
             if let (Some(slot), Some((schema, table))) = (active_slot, bound_table.clone()) {
+                let dialect = self.slot_dialect(Some(slot));
                 let tab = &mut self.tabs[self.active_tab_idx];
-                tab.sql = tab.filter_sort.build_select_sql(&schema, &table);
+                tab.sql = tab.filter_sort.build_select_sql(dialect, &schema, &table);
                 tab.is_running = true;
                 let tid = tab.id;
                 let fs = tab.filter_sort.clone();
@@ -176,6 +177,7 @@ impl CottonDataApp {
 
         if preview_req {
             if let (Some(slot), Some((schema, table))) = (active_slot, bound_table.clone()) {
+                let dialect = self.slot_dialect(Some(slot));
                 let pks = self.catalogs[slot.index()]
                     .as_ref()
                     .map(|cat| cat.primary_keys_for(&schema, &table))
@@ -191,7 +193,7 @@ impl CottonDataApp {
                     } else {
                         pks
                     };
-                    match tab.mutator.build_pending_sql(page, &schema, &table, &fallback_pks) {
+                    match tab.mutator.build_pending_sql(dialect, page, &schema, &table, &fallback_pks) {
                         Ok(batch) if !batch.is_empty() => {
                             self.sql_preview_modal = Some((tab.id, batch.as_script(), batch.statements));
                         }
@@ -220,9 +222,13 @@ impl CottonDataApp {
         let tab = &self.tabs[self.active_tab_idx];
         let all_rows: Vec<usize> = (0..page.row_count).collect();
         let target_table = tab.insert_target_table();
+        let target = SqlInsertTarget {
+            dialect: self.slot_dialect(tab.slot),
+            table_name: &target_table,
+        };
         let result = File::create(&path).and_then(|file| {
             let mut writer = BufWriter::new(file);
-            export_rows(page, &all_rows, fmt, &target_table, &mut writer)
+            export_rows(page, &all_rows, fmt, &target, &mut writer)
         });
         match result {
             Ok(()) => {

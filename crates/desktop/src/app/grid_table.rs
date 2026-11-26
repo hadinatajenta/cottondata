@@ -150,6 +150,7 @@ impl CottonDataApp {
 
         if let Some(col_name) = clicked_sort_col {
             if let (Some(slot), Some((schema, table))) = (active_slot, bound_table) {
+                let dialect = self.slot_dialect(Some(slot));
                 let tab = &mut self.tabs[self.active_tab_idx];
                 let next_dir = match &tab.filter_sort.order_by {
                     Some((c, SortDirection::Asc)) if c == &col_name => Some(SortDirection::Desc),
@@ -158,7 +159,7 @@ impl CottonDataApp {
                 };
                 tab.filter_sort.order_by = next_dir.map(|d| (col_name, d));
                 tab.filter_sort.page_index = 0;
-                tab.sql = tab.filter_sort.build_select_sql(&schema, &table);
+                tab.sql = tab.filter_sort.build_select_sql(dialect, &schema, &table);
                 tab.is_running = true;
                 let tid = tab.id;
                 let fs = tab.filter_sort.clone();

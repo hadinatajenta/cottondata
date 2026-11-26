@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cottondata-core.workspace = true
+cottondata-driver.workspace = true
 cottondata-grid.workspace = true
 cottondata-introspect.workspace = true
 cottondata-mysql.workspace = true

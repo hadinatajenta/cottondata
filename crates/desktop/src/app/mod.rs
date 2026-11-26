@@ -12,6 +12,7 @@ mod row_selection;
 mod server_form;
 mod servers_card;
 mod sessions;
+mod settings_modal;
 mod sql_editor;
 mod table_actions;
 mod top_bar;
@@ -21,14 +22,15 @@ mod workspace;
 use crate::theme::{install_fonts, AppTheme};
 use crate::worker::{SlotCmd, WorkerHub};
 use activity::SlotActivity;
-use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, MAX_SERVERS};
+use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_introspect::{SchemaCatalog, TableDetail};
-use cottondata_mysql::{ProcessEntry, ServerHealthMetrics};
+use cottondata_driver::{ProcessEntry, ServerHealthMetrics};
 use cottondata_storage::{AppStorage, ConnectedServerState, QueryHistoryItem, SessionsStore};
 use eframe::egui;
 use query_tab::{BottomDeckTab, QueryTab};
 use server_form::ServerModalState;
 use sessions::SessionModalState;
+use settings_modal::SettingsModalState;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -38,9 +40,9 @@ pub struct CottonDataApp {
     registry: ServerRegistry,
     active_slot: Option<ServerSlotId>,
     hub: WorkerHub,
-    catalogs: [Option<SchemaCatalog>; MAX_SERVERS],
-    processlists: [Vec<ProcessEntry>; MAX_SERVERS],
-    health: [Option<ServerHealthMetrics>; MAX_SERVERS],
+    catalogs: [Option<SchemaCatalog>; SERVER_SLOT_CAPACITY],
+    processlists: [Vec<ProcessEntry>; SERVER_SLOT_CAPACITY],
+    health: [Option<ServerHealthMetrics>; SERVER_SLOT_CAPACITY],
     ddl_view: Option<(String, String, TableDetail)>,
     tabs: Vec<QueryTab>,
     active_tab_idx: usize,
@@ -52,13 +54,14 @@ pub struct CottonDataApp {
     history: Vec<QueryHistoryItem>,
     modal: Option<ServerModalState>,
     session_modal: Option<SessionModalState>,
+    settings_modal: Option<SettingsModalState>,
     sql_preview_modal: Option<(u64, String, Vec<String>)>,
     toast_banner: Option<(String, bool)>,
     expanded_schemas: HashMap<(usize, String), bool>,
     sessions_store: SessionsStore,
     desired_connected_ids: HashSet<String>,
-    pending_restore: [Option<ConnectedServerState>; MAX_SERVERS],
-    slot_activity: [SlotActivity; MAX_SERVERS],
+    pending_restore: [Option<ConnectedServerState>; SERVER_SLOT_CAPACITY],
+    slot_activity: [SlotActivity; SERVER_SLOT_CAPACITY],
     session_dirty_since: Option<Instant>,
     last_ping_at: Instant,
 }
@@ -103,6 +106,7 @@ impl CottonDataApp {
             history,
             modal: None,
             session_modal: None,
+            settings_modal: None,
             sql_preview_modal: None,
             toast_banner: None,
             expanded_schemas: HashMap::new(),
@@ -115,6 +119,12 @@ impl CottonDataApp {
         };
         app.restore_active_session(true);
         app
+    }
+
+    fn slot_dialect(&self, slot: Option<ServerSlotId>) -> SqlDialect {
+        slot.and_then(|slot_id| self.registry.get(slot_id))
+            .map(|slot| slot.profile.engine.dialect())
+            .unwrap_or_default()
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
@@ -242,6 +252,7 @@ impl eframe::App for CottonDataApp {
         self.render_sidebar(ctx, palette);
         self.render_workspace(ctx, palette);
         self.render_modals(ctx, palette);
+        self.render_settings_modal(ctx, palette);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

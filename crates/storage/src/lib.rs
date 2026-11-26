@@ -5,7 +5,7 @@ pub use sessions::{
     DEFAULT_SESSION_ID, MAX_SESSIONS,
 };
 
-use cottondata_core::{ServerProfile, ServerRegistry, MAX_SERVERS};
+use cottondata_core::{ServerProfile, ServerRegistry, DEFAULT_MAX_SERVERS, SERVER_SLOT_CAPACITY};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -30,8 +30,13 @@ pub struct QueryHistoryItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfilesEnvelope {
     version: u8,
+    #[serde(default = "default_max_servers")]
     max_servers: usize,
     profiles: Vec<ServerProfile>,
+}
+
+fn default_max_servers() -> usize {
+    DEFAULT_MAX_SERVERS
 }
 
 pub struct AppStorage {
@@ -104,19 +109,19 @@ impl AppStorage {
         let raw = fs::read_to_string(&path)?;
         let env: ProfilesEnvelope = serde_json::from_str(&raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let profiles: Vec<ServerProfile> = env.profiles.into_iter().take(MAX_SERVERS).collect();
-        ServerRegistry::from_profiles(profiles)
+        let profiles: Vec<ServerProfile> = env.profiles.into_iter().take(SERVER_SLOT_CAPACITY).collect();
+        ServerRegistry::from_profiles(profiles, env.max_servers)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
     pub fn save_registry(&self, registry: &ServerRegistry) -> io::Result<()> {
         let env = ProfilesEnvelope {
             version: 1,
-            max_servers: MAX_SERVERS,
+            max_servers: registry.max_servers(),
             profiles: registry.profiles(),
         };
         let payload = serde_json::to_string_pretty(&env)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         let path = self.profiles_path();
         let tmp = self.data_dir.join("servers.json.tmp");
         fs::write(&tmp, payload)?;
