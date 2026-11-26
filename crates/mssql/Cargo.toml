@@ -1,0 +1,17 @@
+[package]
+name = "cottondata-mssql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cottondata-core.workspace = true
+cottondata-driver.workspace = true
+cottondata-grid.workspace = true
+cottondata-sql.workspace = true
+tiberius.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+chrono.workspace = true

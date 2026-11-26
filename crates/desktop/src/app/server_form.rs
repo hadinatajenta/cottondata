@@ -86,6 +86,20 @@ impl ServerModalState {
         }
     }
 
+    pub(super) fn switch_engine(&mut self, engine: DatabaseEngine) {
+        let is_default_port = self.port.trim() == self.engine.default_port().to_string();
+        if is_default_port || self.port.trim().is_empty() {
+            self.port = engine.default_port().to_string();
+        }
+        if !engine.supports_unix_socket() {
+            self.use_unix_socket = false;
+        }
+        if self.username.trim() == default_username(self.engine) {
+            self.username = default_username(engine).into();
+        }
+        self.engine = engine;
+    }
+
     pub(super) fn build_profile(&self, existing_id: Option<String>) -> Result<ServerProfile, String> {
         let endpoint = if self.use_unix_socket && self.engine.supports_unix_socket() {
             ConnectionEndpoint::UnixSocket {
@@ -171,5 +185,12 @@ impl ServerModalState {
         };
         profile.validate().map_err(|e| e.to_string())?;
         Ok(profile)
+    }
+}
+
+fn default_username(engine: DatabaseEngine) -> &'static str {
+    match engine {
+        DatabaseEngine::MySql => "root",
+        DatabaseEngine::SqlServer => "sa",
     }
 }

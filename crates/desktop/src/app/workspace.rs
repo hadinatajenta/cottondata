@@ -190,13 +190,13 @@ impl CottonDataApp {
                     let runtime = self
                         .active_slot
                         .and_then(|slot_id| self.registry.get(slot_id))
-                        .and_then(|slot| slot.runtime.as_ref());
+                        .and_then(|slot| slot.runtime.as_ref().map(|runtime| (slot.profile.engine, runtime)));
                     match runtime {
-                        Some(runtime) => {
+                        Some((engine, runtime)) => {
                             ui.label(icon_text(
                                 icon::PLUGS_CONNECTED,
                                 palette.success,
-                                &format!("MySQL {}", runtime.version),
+                                &format!("{} {}", engine.label(), runtime.version),
                                 palette.text_muted,
                                 11.5,
                             ));

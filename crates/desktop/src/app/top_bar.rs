@@ -101,7 +101,7 @@ impl CottonDataApp {
     fn render_connection_group(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let add_label = format!("Server {}/{}", self.registry.count(), self.registry.max_servers());
         if primary_button(ui, palette, icon::PLUS, &add_label, !self.registry.is_full())
-            .on_hover_text("Add a MySQL server")
+            .on_hover_text("Add a server")
             .clicked()
         {
             self.modal = Some(ServerModalState::new_empty());

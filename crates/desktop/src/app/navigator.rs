@@ -35,7 +35,7 @@ impl CottonDataApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .toggle_value(&mut self.show_system_schemas, RichText::new("System").size(11.5))
-                    .on_hover_text("Show MySQL system schemas")
+                    .on_hover_text("Show system schemas and databases")
                     .changed()
                 {
                     self.mark_session_dirty();

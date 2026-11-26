@@ -52,7 +52,7 @@ impl CottonDataApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_add = !self.registry.is_full();
                 let add_clicked = ui
-                    .add_enabled_ui(can_add, |ui| icon_button(ui, palette, icon::PLUS, "Add a MySQL server"))
+                    .add_enabled_ui(can_add, |ui| icon_button(ui, palette, icon::PLUS, "Add a server"))
                     .inner
                     .clicked();
                 if add_clicked {
@@ -64,9 +64,9 @@ impl CottonDataApp {
         ui.add_space(4.0);
 
         if self.registry.count() == 0 {
-            caption(ui, palette, "No MySQL servers yet. Add up to 10 with no JVM overhead.");
+            caption(ui, palette, "No servers yet. Add MySQL or SQL Server connections.");
             ui.add_space(4.0);
-            if secondary_button(ui, palette, icon::PLUS, "Add MySQL server", true).clicked() {
+            if secondary_button(ui, palette, icon::PLUS, "Add server", true).clicked() {
                 self.modal = Some(ServerModalState::new_empty());
             }
             return;

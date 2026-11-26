@@ -2,7 +2,7 @@ use super::CottonDataApp;
 use crate::theme::Palette;
 use crate::ui_kit::{banner, icon, primary_button, secondary_button};
 use crate::worker::SlotCmd;
-use cottondata_core::{EnvironmentTag, TlsMode};
+use cottondata_core::{DatabaseEngine, EnvironmentTag, TlsMode};
 use eframe::egui::{self, RichText};
 
 impl CottonDataApp {
@@ -12,7 +12,7 @@ impl CottonDataApp {
         if let Some((tab_id, script, statements)) = self.sql_preview_modal.clone() {
             let mut open = true;
             let mut submit_now = false;
-            egui::Window::new("Preview Staged MySQL Transaction")
+            egui::Window::new("Preview Staged Transaction")
                 .open(&mut open)
                 .resizable(true)
                 .default_width(620.0)
@@ -60,9 +60,13 @@ impl CottonDataApp {
         let mut keep_open = true;
         let mut save_clicked = false;
         let title = if let Some(slot) = state.editing_slot {
-            format!("Edit MySQL Server ({slot})")
+            format!("Edit Server ({slot})")
         } else {
-            format!("Add Server (Slot {}/{})", self.registry.count() + 1, self.registry.max_servers())
+            format!(
+                "Add Server (Slot {}/{})",
+                self.registry.count() + 1,
+                self.registry.max_servers()
+            )
         };
 
         egui::Window::new(title)
@@ -79,18 +83,30 @@ impl CottonDataApp {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
+                        ui.label("Database");
+                        ui.horizontal(|ui| {
+                            for engine in DatabaseEngine::ALL {
+                                if ui.selectable_label(state.engine == engine, engine.label()).clicked() {
+                                    state.switch_engine(engine);
+                                }
+                            }
+                        });
+                        ui.end_row();
+
                         ui.label("Server Name");
                         ui.text_edit_singleline(&mut state.name);
                         ui.end_row();
 
-                        ui.label("Transport");
-                        ui.horizontal(|ui| {
-                            ui.radio_value(&mut state.use_unix_socket, false, "TCP/IP");
-                            ui.radio_value(&mut state.use_unix_socket, true, "Unix Socket");
-                        });
-                        ui.end_row();
+                        if state.engine.supports_unix_socket() {
+                            ui.label("Transport");
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut state.use_unix_socket, false, "TCP/IP");
+                                ui.radio_value(&mut state.use_unix_socket, true, "Unix Socket");
+                            });
+                            ui.end_row();
+                        }
 
-                        if state.use_unix_socket {
+                        if state.use_unix_socket && state.engine.supports_unix_socket() {
                             ui.label("Socket Path");
                             ui.text_edit_singleline(&mut state.socket_path);
                             ui.end_row();
@@ -122,7 +138,10 @@ impl CottonDataApp {
                         );
                         ui.end_row();
 
-                        ui.label("Default Schema");
+                        ui.label(match state.engine {
+                            DatabaseEngine::MySql => "Default Schema",
+                            DatabaseEngine::SqlServer => "Default Database",
+                        });
                         ui.text_edit_singleline(&mut state.default_schema);
                         ui.end_row();
 

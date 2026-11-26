@@ -506,7 +506,7 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, None);
                     continue;
                 };
-                let sql = format!("KILL QUERY {pid}");
+                let sql = sess.dialect().kill_process(pid);
                 match sess.execute_sql(&sql, 1) {
                     Ok(_) => {
                         if let Ok(entries) = sess.fetch_processlist() {

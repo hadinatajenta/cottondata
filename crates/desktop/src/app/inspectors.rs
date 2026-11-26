@@ -123,8 +123,9 @@ impl CottonDataApp {
             );
             return;
         };
-        let has_full_scan =
-            exp.raw_output.contains("\"access_type\": \"ALL\"") || exp.raw_output.contains("Table scan");
+        let has_full_scan = exp.raw_output.contains("\"access_type\": \"ALL\"")
+            || exp.raw_output.contains("Table scan")
+            || exp.raw_output.contains("PhysicalOp=\"Table Scan\"");
         ui.horizontal(|ui| {
             ui.label(icon_text(icon::CHART_BAR, p.accent, &exp.label, p.text_primary, 13.0));
             caption(ui, p, format!("{} ms", exp.elapsed_ms));

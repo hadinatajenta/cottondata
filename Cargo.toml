@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/driver",
     "crates/mysql",
+    "crates/mssql",
     "crates/introspect",
     "crates/sql",
     "crates/grid",
@@ -24,6 +25,7 @@ repository = "https://github.com/hadinatajenta/cottondata"
 cottondata-core = { path = "crates/core" }
 cottondata-driver = { path = "crates/driver" }
 cottondata-mysql = { path = "crates/mysql" }
+cottondata-mssql = { path = "crates/mssql" }
 cottondata-introspect = { path = "crates/introspect" }
 cottondata-sql = { path = "crates/sql" }
 cottondata-grid = { path = "crates/grid" }
@@ -32,6 +34,12 @@ cottondata-storage = { path = "crates/storage" }
 eframe = { version = "=0.31.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 rfd = { version = "=0.15.3", default-features = false }
 egui-phosphor = { version = "=0.9.0", default-features = false, features = ["regular"] }
+tiberius = { version = "=0.13.0", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 mysql = { version = "26.0.1", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
 mimalloc = "0.1.48"
 lasso = "0.7.3"

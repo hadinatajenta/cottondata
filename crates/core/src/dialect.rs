@@ -107,9 +107,7 @@ impl SqlDialect {
             .unwrap_or_default();
         match self {
             Self::MySql => {
-                let order_sql = order_by
-                    .map(|order| format!(" ORDER BY {order}"))
-                    .unwrap_or_default();
+                let order_sql = order_by.map(|order| format!(" ORDER BY {order}")).unwrap_or_default();
                 format!("SELECT * FROM {table_ref}{where_sql}{order_sql} LIMIT {limit} OFFSET {offset}")
             }
             Self::SqlServer => {
@@ -118,6 +116,13 @@ impl SqlDialect {
                     "SELECT * FROM {table_ref}{where_sql} ORDER BY {order_sql} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
                 )
             }
+        }
+    }
+
+    pub fn kill_process(self, process_id: u64) -> String {
+        match self {
+            Self::MySql => format!("KILL QUERY {process_id}"),
+            Self::SqlServer => format!("KILL {process_id}"),
         }
     }
 
@@ -148,7 +153,10 @@ mod tests {
             SqlDialect::SqlServer.qualified_table("shop", "sales.orders"),
             "[shop].[sales].[orders]"
         );
-        assert_eq!(SqlDialect::SqlServer.qualified_table("shop", "orders"), "[shop].[dbo].[orders]");
+        assert_eq!(
+            SqlDialect::SqlServer.qualified_table("shop", "orders"),
+            "[shop].[dbo].[orders]"
+        );
         assert_eq!(SqlDialect::MySql.qualified_table("shop", "orders"), "`shop`.`orders`");
     }
 
@@ -169,7 +177,10 @@ mod tests {
             SqlDialect::SqlServer.update_single_row("[t]", "[a] = 1", "[id] = 2"),
             "UPDATE TOP (1) [t] SET [a] = 1 WHERE [id] = 2"
         );
-        assert_eq!(SqlDialect::SqlServer.insert_default_values("[t]"), "INSERT INTO [t] DEFAULT VALUES");
+        assert_eq!(
+            SqlDialect::SqlServer.insert_default_values("[t]"),
+            "INSERT INTO [t] DEFAULT VALUES"
+        );
     }
 
     #[test]
@@ -186,6 +197,12 @@ mod tests {
             SqlDialect::SqlServer.paged_select("[t]", None, Some("[id] DESC"), 10, 20),
             "SELECT * FROM [t] ORDER BY [id] DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
         );
+    }
+
+    #[test]
+    fn kill_statement_matches_each_server_syntax() {
+        assert_eq!(SqlDialect::MySql.kill_process(42), "KILL QUERY 42");
+        assert_eq!(SqlDialect::SqlServer.kill_process(42), "KILL 42");
     }
 
     #[test]

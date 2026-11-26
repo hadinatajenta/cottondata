@@ -16,8 +16,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 const ICON_64_RGBA: &[u8] = include_bytes!("../../../assets/AppIcon-64.rgba");
 
 fn main() -> eframe::Result<()> {
+    drivers::install_tls_crypto_provider();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("CottonData — MySQL")
+        .with_title("CottonData")
         .with_inner_size([1360.0, 860.0])
         .with_min_inner_size([920.0, 600.0]);
 

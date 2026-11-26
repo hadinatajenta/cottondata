@@ -47,7 +47,7 @@ impl CottonDataApp {
         }
         let slot = tab.slot.or(self.active_slot);
         let Some(slot) = slot else {
-            self.toast_banner = Some(("Add and connect a MySQL server first.".into(), true));
+            self.toast_banner = Some(("Add and connect a server first.".into(), true));
             return;
         };
         tab.slot = Some(slot);

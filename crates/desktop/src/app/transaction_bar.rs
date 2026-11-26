@@ -29,7 +29,7 @@ impl CottonDataApp {
             icon::HAND_PALM
         };
         let toggle_clicked = ghost_button(ui, palette, autocommit_glyph, label_for(autocommit_label), has_runtime)
-            .on_hover_text("Toggle MySQL autocommit for this session")
+            .on_hover_text("Toggle autocommit for this session")
             .clicked();
         let begin_clicked = ghost_button(
             ui,
