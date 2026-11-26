@@ -2,6 +2,18 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.7.0] — 2026-11-26
+
+### Added
+- **Foreign Key Navigation (Outbound & Inbound)**:
+  - Introspects both outbound and inbound foreign keys (`InboundForeignKeyInfo`) for MySQL (`information_schema.key_column_usage`) and SQL Server (`sys.foreign_keys`), quietly preloading table metadata for open table tabs and single-table `SELECT` console results.
+  - Outbound FK cells display link styling and hover tooltips; `Cmd/Ctrl+Click` or right-click → *Go to `table.column`* opens the referenced table pre-filtered to that value.
+  - Right-click any referenced key column → *Find referencing rows* lists all child tables pointing to that column and opens a filtered tab in one click.
+  - DDL & Indexes inspector now also lists **Referenced by** inbound foreign keys.
+- **Parameterized Queries (`:name` and `?`)**:
+  - Lexer-aware parameter extractor and dialect-safe binder in `crates/sql/src/params.rs` (ignores string literals, quoted identifiers, comments, `:=`, and `::`; preserves leading-zero codes like `"01"` as strings in `Auto` mode).
+  - Running a parameterized query opens a `modal_shell` **Query Parameters** dialog with value inputs, type selectors (`Auto`, `Text`, `Number`, `NULL`, `Raw SQL`), live syntax-highlighted bound SQL preview, `Cmd/Ctrl+Enter` execution, and automatic per-query value memory.
+
 ## [0.6.0] — 2026-11-26
 
 ### Added
