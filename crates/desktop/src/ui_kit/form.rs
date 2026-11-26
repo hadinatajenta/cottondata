@@ -195,73 +195,101 @@ pub fn option_card(
     selected: bool,
     width: f32,
 ) -> Response {
-    let mut prepared = egui::Frame::new()
-        .corner_radius(CornerRadius::same(CARD_RADIUS))
-        .inner_margin(Margin::symmetric(12, 10))
-        .begin(ui);
-    {
-        let content_ui = &mut prepared.content_ui;
-        let inner_width = (width - 24.0).max(0.0);
-        content_ui.set_width(inner_width);
-        content_ui.horizontal(|ui| {
-            if !glyph.is_empty() {
-                let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
-                let icon_color = if selected { palette.accent } else { palette.text_muted };
-                let painter = ui.painter();
-                painter.rect_filled(
-                    badge_rect,
-                    CornerRadius::same(RADIUS_CONTROL),
-                    icon_color.gamma_multiply(0.14),
-                );
-                painter.text(
-                    badge_rect.center(),
-                    Align2::CENTER_CENTER,
-                    glyph,
-                    FontId::proportional(15.0),
-                    icon_color,
-                );
-                ui.add_space(2.0);
-            }
-            let text_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(text_width, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(text_width);
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    let title_color = if selected {
-                        palette.accent
-                    } else {
-                        palette.text_primary
-                    };
-                    ui.add(egui::Label::new(RichText::new(title).size(13.0).strong().color(title_color)).truncate());
-                    if !subtitle.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(subtitle).size(11.5).color(palette.text_muted)).wrap());
-                    }
-                },
+    let pad_x = 12.0;
+    let pad_y = 11.0;
+    let badge_size = 30.0;
+    let icon_gap = 10.0;
+    let has_icon = !glyph.is_empty();
+    let text_x_offset = pad_x + if has_icon { badge_size + icon_gap } else { 0.0 };
+    let text_width = (width - text_x_offset - pad_x).max(40.0);
+
+    let title_color = if selected {
+        palette.accent
+    } else {
+        palette.text_primary
+    };
+    let title_galley = ui.fonts(|f| {
+        let mut job = egui::text::LayoutJob::simple(
+            title.to_string(),
+            FontId::proportional(13.0),
+            title_color,
+            text_width,
+        );
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        f.layout_job(job)
+    });
+    let sub_galley = (!subtitle.is_empty()).then(|| {
+        ui.fonts(|f| {
+            f.layout(
+                subtitle.to_string(),
+                FontId::proportional(11.5),
+                palette.text_muted,
+                text_width,
+            )
+        })
+    });
+    let sub_gap = if sub_galley.is_some() { 2.0 } else { 0.0 };
+    let text_block_h = title_galley.size().y + sub_gap + sub_galley.as_ref().map_or(0.0, |g| g.size().y);
+    let card_h = text_block_h.max(badge_size) + pad_y * 2.0;
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, card_h), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if selected {
+            palette.accent_soft
+        } else if response.hovered() {
+            palette.bg_hover
+        } else {
+            palette.bg_surface
+        };
+        let stroke = if selected {
+            Stroke::new(1.5, palette.accent)
+        } else {
+            Stroke::new(1.0, palette.border)
+        };
+        painter.rect(
+            rect,
+            CornerRadius::same(CARD_RADIUS),
+            fill,
+            stroke,
+            StrokeKind::Inside,
+        );
+
+        if has_icon {
+            let badge_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + pad_x + badge_size * 0.5, rect.center().y),
+                egui::vec2(badge_size, badge_size),
             );
-        });
+            let icon_color = if selected { palette.accent } else { palette.text_muted };
+            painter.rect_filled(
+                badge_rect,
+                CornerRadius::same(RADIUS_CONTROL),
+                icon_color.gamma_multiply(0.14),
+            );
+            painter.text(
+                badge_rect.center(),
+                Align2::CENTER_CENTER,
+                glyph,
+                FontId::proportional(15.0),
+                icon_color,
+            );
+        }
+
+        let text_top = rect.center().y - text_block_h * 0.5;
+        let text_left = rect.left() + text_x_offset;
+        painter.galley(egui::pos2(text_left, text_top), title_galley.clone(), title_color);
+        if let Some(sub) = sub_galley {
+            painter.galley(
+                egui::pos2(text_left, text_top + title_galley.size().y + sub_gap),
+                sub,
+                palette.text_muted,
+            );
+        }
     }
 
-    let rect = prepared.allocate_space(ui).rect;
-    let id = ui.make_persistent_id(("option_card", title, subtitle));
-    let response = ui
-        .interact(rect, id, Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-
-    prepared.frame.fill = if selected {
-        palette.accent_soft
-    } else if response.hovered() {
-        palette.bg_hover
-    } else {
-        palette.bg_surface
-    };
-    prepared.frame.stroke = if selected {
-        Stroke::new(1.5, palette.accent)
-    } else {
-        Stroke::new(1.0, palette.border)
-    };
-    prepared.paint(ui);
     response
 }
 
@@ -273,79 +301,99 @@ pub fn toggle_card(
     description: &str,
 ) -> Response {
     let full_width = ui.available_width();
-    let mut prepared = egui::Frame::new()
-        .corner_radius(CornerRadius::same(CARD_RADIUS))
-        .inner_margin(Margin::symmetric(12, 10))
-        .begin(ui);
-    {
-        let content_ui = &mut prepared.content_ui;
-        let inner_width = (full_width - 24.0).max(0.0);
-        content_ui.set_width(inner_width);
-        content_ui.horizontal(|ui| {
-            let (box_rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
-            let painter = ui.painter();
-            if *checked {
-                painter.rect_filled(box_rect, CornerRadius::same(4), palette.accent);
-                painter.text(
-                    box_rect.center(),
-                    Align2::CENTER_CENTER,
-                    icon::CHECK,
-                    FontId::proportional(11.0),
-                    palette.on_accent,
-                );
-            } else {
-                painter.rect_filled(box_rect, CornerRadius::same(4), palette.bg_card);
-                painter.rect_stroke(
-                    box_rect,
-                    CornerRadius::same(4),
-                    Stroke::new(1.0, palette.border),
-                    StrokeKind::Inside,
-                );
-            }
-            ui.add_space(2.0);
-            let text_width = ui.available_width().max(0.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(text_width, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(text_width);
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(
-                        egui::Label::new(RichText::new(title).size(13.0).strong().color(palette.text_primary)).wrap(),
-                    );
-                    if !description.is_empty() {
-                        ui.add(
-                            egui::Label::new(RichText::new(description).size(11.5).color(palette.text_muted)).wrap(),
-                        );
-                    }
-                },
-            );
-        });
-    }
+    let pad_x = 12.0;
+    let pad_y = 11.0;
+    let box_size = 16.0;
+    let box_gap = 10.0;
+    let text_x_offset = pad_x + box_size + box_gap;
+    let text_width = (full_width - text_x_offset - pad_x).max(40.0);
 
-    let rect = prepared.allocate_space(ui).rect;
-    let id = ui.make_persistent_id(("toggle_card", title, description));
-    let mut response = ui
-        .interact(rect, id, Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let title_galley = ui.fonts(|f| {
+        f.layout(
+            title.to_string(),
+            FontId::proportional(13.0),
+            palette.text_primary,
+            text_width,
+        )
+    });
+    let desc_galley = (!description.is_empty()).then(|| {
+        ui.fonts(|f| {
+            f.layout(
+                description.to_string(),
+                FontId::proportional(11.5),
+                palette.text_muted,
+                text_width,
+            )
+        })
+    });
+    let desc_gap = if desc_galley.is_some() { 3.0 } else { 0.0 };
+    let text_block_h = title_galley.size().y + desc_gap + desc_galley.as_ref().map_or(0.0, |g| g.size().y);
+    let card_h = text_block_h.max(box_size) + pad_y * 2.0;
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(full_width, card_h), Sense::click());
+    let mut response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
         *checked = !*checked;
         response.mark_changed();
     }
 
-    prepared.frame.fill = if *checked {
-        palette.accent_soft
-    } else if response.hovered() {
-        palette.bg_hover
-    } else {
-        palette.bg_surface
-    };
-    prepared.frame.stroke = if *checked {
-        Stroke::new(1.0, palette.accent)
-    } else {
-        Stroke::new(1.0, palette.border)
-    };
-    prepared.paint(ui);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if *checked {
+            palette.accent_soft
+        } else if response.hovered() {
+            palette.bg_hover
+        } else {
+            palette.bg_surface
+        };
+        let stroke = if *checked {
+            Stroke::new(1.5, palette.accent)
+        } else {
+            Stroke::new(1.0, palette.border)
+        };
+        painter.rect(
+            rect,
+            CornerRadius::same(CARD_RADIUS),
+            fill,
+            stroke,
+            StrokeKind::Inside,
+        );
+
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + pad_x + box_size * 0.5, rect.center().y),
+            egui::vec2(box_size, box_size),
+        );
+        if *checked {
+            painter.rect_filled(box_rect, CornerRadius::same(4), palette.accent);
+            painter.text(
+                box_rect.center(),
+                Align2::CENTER_CENTER,
+                icon::CHECK,
+                FontId::proportional(11.0),
+                palette.on_accent,
+            );
+        } else {
+            painter.rect_filled(box_rect, CornerRadius::same(4), palette.bg_card);
+            painter.rect_stroke(
+                box_rect,
+                CornerRadius::same(4),
+                Stroke::new(1.0, palette.border),
+                StrokeKind::Inside,
+            );
+        }
+
+        let text_top = rect.center().y - text_block_h * 0.5;
+        let text_left = rect.left() + text_x_offset;
+        painter.galley(egui::pos2(text_left, text_top), title_galley.clone(), palette.text_primary);
+        if let Some(desc) = desc_galley {
+            painter.galley(
+                egui::pos2(text_left, text_top + title_galley.size().y + desc_gap),
+                desc,
+                palette.text_muted,
+            );
+        }
+    }
+
     response
 }
 

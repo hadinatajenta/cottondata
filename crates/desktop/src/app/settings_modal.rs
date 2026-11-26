@@ -61,7 +61,7 @@ impl CottonDataApp {
                 ui.add_space(6.0);
                 let gap = 10.0;
                 let card_w = (full_w - gap) / 2.0;
-                ui.horizontal(|ui| {
+                ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     if option_card(
                         ui,

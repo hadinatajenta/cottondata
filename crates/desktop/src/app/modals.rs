@@ -446,7 +446,7 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
     section_heading(ui, p, "Database Engine");
     ui.add_space(6.0);
     let card_w = (full_w - gap) / 2.0;
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
         for engine in DatabaseEngine::ALL {
             let subtitle = match engine {
@@ -597,7 +597,7 @@ fn render_security_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalSta
     let card_w = (full_w - gap) / 2.0;
     let tls_modes = TlsMode::all();
     for pair in tls_modes.chunks(2) {
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for &mode in pair {
                 let desc = match mode {
