@@ -83,14 +83,16 @@ impl CottonDataApp {
         };
 
         let mut sql_edited = false;
+        let editor_h = self.editor_height;
         inset_frame(p).show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("sql_editor_scroll")
-                .max_height(190.0)
+                .max_height(editor_h)
+                .min_scrolled_height(editor_h)
                 .show(ui, |ui| {
                     let tab = &mut self.tabs[self.active_tab_idx];
                     let out = egui::TextEdit::multiline(&mut tab.sql)
-                        .desired_rows(7)
+                        .desired_rows(6)
                         .desired_width(f32::INFINITY)
                         .code_editor()
                         .frame(false)
@@ -139,10 +141,10 @@ impl CottonDataApp {
         }
 
         if run_current {
-            self.execute_active_tab(false);
+            self.request_execute_active_tab(false);
         }
         if run_all {
-            self.execute_active_tab(true);
+            self.request_execute_active_tab(true);
         }
         if stop_query {
             if let Some(slot_id) = slot_for_tab {

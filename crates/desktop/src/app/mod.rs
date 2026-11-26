@@ -34,6 +34,14 @@ use settings_modal::SettingsModalState;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+#[derive(Clone)]
+pub(super) enum PendingDiscardAction {
+    CloseTab(usize),
+    ReloadTablePage { page_index: u64 },
+    SortColumn(String),
+    RunQuery(bool),
+}
+
 pub struct CottonDataApp {
     theme: AppTheme,
     storage: AppStorage,
@@ -56,7 +64,11 @@ pub struct CottonDataApp {
     session_modal: Option<SessionModalState>,
     settings_modal: Option<SettingsModalState>,
     sql_preview_modal: Option<(u64, String, Vec<String>)>,
+    unsaved_guard_modal: Option<PendingDiscardAction>,
+    after_save_action: Option<PendingDiscardAction>,
+    editor_height: f32,
     toast_banner: Option<(String, bool)>,
+    expanded_servers: [bool; SERVER_SLOT_CAPACITY],
     expanded_schemas: HashMap<(usize, String), bool>,
     sessions_store: SessionsStore,
     desired_connected_ids: HashSet<String>,
@@ -108,7 +120,11 @@ impl CottonDataApp {
             session_modal: None,
             settings_modal: None,
             sql_preview_modal: None,
+            unsaved_guard_modal: None,
+            after_save_action: None,
+            editor_height: 190.0,
             toast_banner: None,
+            expanded_servers: [false; SERVER_SLOT_CAPACITY],
             expanded_schemas: HashMap::new(),
             sessions_store,
             desired_connected_ids: HashSet::new(),
@@ -133,10 +149,21 @@ impl CottonDataApp {
         self.persist_sessions_now();
     }
 
-    fn open_console_tab(&mut self) {
+    pub(super) fn open_console_tab(&mut self) {
+        self.open_console_tab_for_slot(self.active_slot, None);
+    }
+
+    pub(super) fn open_console_tab_for_slot(&mut self, slot: Option<ServerSlotId>, initial_sql: Option<String>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        self.tabs.push(QueryTab::new_console(id, self.active_slot));
+        let mut tab = QueryTab::new_console(id, slot);
+        if let Some(sql) = initial_sql {
+            tab.sql = sql;
+        }
+        if let Some(s) = slot {
+            self.active_slot = Some(s);
+        }
+        self.tabs.push(tab);
         self.active_tab_idx = self.tabs.len() - 1;
         self.persist_sessions_now();
     }
@@ -154,6 +181,18 @@ impl CottonDataApp {
     }
 
     fn close_tab(&mut self, idx: usize) {
+        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[idx].mutator.has_changes() {
+            self.activate_tab(idx);
+            self.unsaved_guard_modal = Some(PendingDiscardAction::CloseTab(idx));
+            return;
+        }
+        self.force_close_tab(idx);
+    }
+
+    pub(super) fn force_close_tab(&mut self, idx: usize) {
         if self.tabs.len() <= 1 || idx >= self.tabs.len() {
             return;
         }
@@ -218,23 +257,51 @@ impl CottonDataApp {
             egui::Key::Num9,
             egui::Key::Num0,
         ];
+        let modal_open = self.modal.is_some()
+            || self.session_modal.is_some()
+            || self.settings_modal.is_some()
+            || self.sql_preview_modal.is_some()
+            || self.unsaved_guard_modal.is_some();
+        let is_editing_cell = self.tabs[self.active_tab_idx].inline_editor.is_some();
+        let mut run_query = false;
+        let mut new_console = false;
+        let mut close_active = false;
+        let mut chosen_slot = None;
         ctx.input(|i| {
-            if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
-                self.execute_active_tab(false);
+            if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::Enter) {
+                run_query = true;
             }
-            if i.modifiers.command {
+            if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::T) {
+                new_console = true;
+            }
+            if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::W) {
+                close_active = true;
+            }
+            if !modal_open && i.modifiers.command {
                 for (idx, key) in keys.iter().enumerate() {
                     if i.key_pressed(*key) {
                         if let Some(slot_id) = ServerSlotId::new(idx) {
                             if self.registry.get(slot_id).is_some() {
-                                self.active_slot = Some(slot_id);
-                                self.mark_session_dirty();
+                                chosen_slot = Some(slot_id);
                             }
                         }
                     }
                 }
             }
         });
+        if run_query {
+            self.request_execute_active_tab(false);
+        }
+        if new_console {
+            self.open_console_tab();
+        }
+        if close_active {
+            self.close_tab(self.active_tab_idx);
+        }
+        if let Some(slot_id) = chosen_slot {
+            self.active_slot = Some(slot_id);
+            self.mark_session_dirty();
+        }
     }
 }
 

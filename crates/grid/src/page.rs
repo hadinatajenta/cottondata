@@ -5,18 +5,38 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMeta {
     pub name: String,
+    #[serde(default)]
+    pub org_name: Option<String>,
     pub table: Option<String>,
     pub schema: Option<String>,
     pub type_name: String,
     pub is_primary_key: bool,
+    #[serde(default)]
+    pub is_unique_key: bool,
     pub is_nullable: bool,
     pub is_auto_increment: bool,
     pub is_numeric: bool,
+    #[serde(default)]
+    pub is_binary: bool,
+}
+
+impl ColumnMeta {
+    pub fn sql_column_name(&self) -> &str {
+        self.org_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.name)
+    }
+
+    pub fn is_computed(&self) -> bool {
+        self.table.is_some() && self.org_name.as_deref().is_some_and(str::is_empty)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellValue {
     Null,
+    DefaultExpr,
     Text(String),
     Truncated { preview: String, total_bytes: usize },
 }
@@ -42,6 +62,7 @@ impl CellValue {
     pub fn as_display_str(&self) -> &str {
         match self {
             Self::Null => "NULL",
+            Self::DefaultExpr => "DEFAULT",
             Self::Text(s) => s.as_str(),
             Self::Truncated { preview, .. } => preview.as_str(),
         }
@@ -50,12 +71,21 @@ impl CellValue {
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
+
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::DefaultExpr)
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        matches!(self, Self::Truncated { .. })
+    }
 }
 
 impl fmt::Display for CellValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Null => f.write_str("NULL"),
+            Self::DefaultExpr => f.write_str("DEFAULT"),
             Self::Text(s) => f.write_str(s),
             Self::Truncated { preview, total_bytes } => {
                 write!(f, "{preview}… [{total_bytes} B]")
@@ -159,7 +189,7 @@ impl ColumnarPage {
             let val = values.get(col_idx).unwrap_or(&CellValue::Null);
             let bit_index = row_idx * col_count + col_idx;
             match val {
-                CellValue::Null => {
+                CellValue::Null | CellValue::DefaultExpr => {
                     self.null_bitmap[bit_index / 64] |= 1u64 << (bit_index % 64);
                     col_vec.push(ArenaSlice {
                         offset: 0,
@@ -271,23 +301,29 @@ mod tests {
         vec![
             ColumnMeta {
                 name: "id".into(),
+                org_name: Some("id".into()),
                 table: Some("users".into()),
                 schema: Some("app".into()),
                 type_name: "bigint unsigned".into(),
                 is_primary_key: true,
+                is_unique_key: false,
                 is_nullable: false,
                 is_auto_increment: true,
                 is_numeric: true,
+                is_binary: false,
             },
             ColumnMeta {
                 name: "email".into(),
+                org_name: Some("email".into()),
                 table: Some("users".into()),
                 schema: Some("app".into()),
                 type_name: "varchar(255)".into(),
                 is_primary_key: false,
+                is_unique_key: false,
                 is_nullable: true,
                 is_auto_increment: false,
                 is_numeric: false,
+                is_binary: false,
             },
         ]
     }

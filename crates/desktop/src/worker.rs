@@ -42,6 +42,15 @@ pub enum SlotCmd {
         tab_id: u64,
         statements: Vec<String>,
     },
+    FetchFullCell {
+        tab_id: u64,
+        row: usize,
+        column: usize,
+        schema: String,
+        table: String,
+        column_name: String,
+        pk_where: String,
+    },
     ExplainQuery {
         tab_id: u64,
         sql: String,
@@ -98,6 +107,12 @@ pub enum WorkerEvent {
         tab_id: u64,
         statement_count: usize,
         elapsed_ms: u64,
+    },
+    FullCellLoaded {
+        tab_id: u64,
+        row: usize,
+        column: usize,
+        value: Option<String>,
     },
     ExplainFinished {
         tab_id: u64,
@@ -420,6 +435,56 @@ fn slot_worker_loop(
                             tab_id,
                             statement_count: count,
                             elapsed_ms,
+                        },
+                    ),
+                    Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
+                }
+            }
+            SlotCmd::FetchFullCell {
+                tab_id,
+                row,
+                column,
+                schema,
+                table,
+                column_name,
+                pk_where,
+            } => {
+                let Some(sess) = session.as_mut() else {
+                    emit_not_connected(&tx, &ctx, slot, Some(tab_id));
+                    continue;
+                };
+                let dialect = sess.dialect();
+                let fq_table = dialect.qualified_table(&schema, &table);
+                let col_ident = dialect.quote_ident(&column_name);
+                let sql = match dialect {
+                    cottondata_core::SqlDialect::MySql => {
+                        format!("SELECT {col_ident} FROM {fq_table} WHERE {pk_where} LIMIT 1")
+                    }
+                    cottondata_core::SqlDialect::SqlServer => {
+                        format!("SELECT TOP (1) {col_ident} FROM {fq_table} WHERE {pk_where}")
+                    }
+                };
+                match sess.execute_sql(&sql, 1) {
+                    Ok(QueryOutcome::Rows(page)) => {
+                        let value = page.cell_str(0, 0).map(ToOwned::to_owned);
+                        emit(
+                            &tx,
+                            &ctx,
+                            WorkerEvent::FullCellLoaded {
+                                tab_id,
+                                row,
+                                column,
+                                value,
+                            },
+                        );
+                    }
+                    Ok(_) => emit(
+                        &tx,
+                        &ctx,
+                        WorkerEvent::Error {
+                            slot,
+                            tab_id: Some(tab_id),
+                            error: DbError::message("Row not found when loading full cell value"),
                         },
                     ),
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),

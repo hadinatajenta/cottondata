@@ -225,18 +225,7 @@ impl SchemaCatalog {
     }
 
     pub fn primary_keys_for(&self, schema_name: &str, table_name: &str) -> Vec<String> {
-        let Some(schema) = self
-            .schemas
-            .iter()
-            .find(|s| self.interner.resolve(&s.name).eq_ignore_ascii_case(schema_name))
-        else {
-            return Vec::new();
-        };
-        let Some(table) = schema
-            .tables
-            .iter()
-            .find(|t| self.interner.resolve(&t.name).eq_ignore_ascii_case(table_name))
-        else {
+        let Some(table) = self.find_table(schema_name, table_name) else {
             return Vec::new();
         };
         table
@@ -245,6 +234,44 @@ impl SchemaCatalog {
             .filter(|c| c.is_primary_key)
             .map(|c| self.interner.resolve(&c.name).to_string())
             .collect()
+    }
+
+    pub fn table_kind(&self, schema_name: &str, table_name: &str) -> Option<TableKind> {
+        self.find_table(schema_name, table_name).map(|table| table.kind)
+    }
+
+    pub fn unique_key_columns_for(&self, schema_name: &str, table_name: &str) -> Vec<String> {
+        let Some(table) = self.find_table(schema_name, table_name) else {
+            return Vec::new();
+        };
+        let Some(detail) = &table.detail else {
+            return Vec::new();
+        };
+        for index in &detail.indexes {
+            if index.non_unique || index.columns.is_empty() {
+                continue;
+            }
+            let all_not_null = index.columns.iter().all(|col_name| {
+                table.columns.iter().any(|c| {
+                    self.interner.resolve(&c.name).eq_ignore_ascii_case(col_name) && !c.is_nullable
+                })
+            });
+            if all_not_null {
+                return index.columns.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    fn find_table(&self, schema_name: &str, table_name: &str) -> Option<&TableEntry> {
+        let schema = self
+            .schemas
+            .iter()
+            .find(|s| self.interner.resolve(&s.name).eq_ignore_ascii_case(schema_name))?;
+        schema
+            .tables
+            .iter()
+            .find(|t| self.interner.resolve(&t.name).eq_ignore_ascii_case(table_name))
     }
 
     pub fn completion_hints(&self, active_schema: Option<&str>) -> Vec<SchemaTableHint> {

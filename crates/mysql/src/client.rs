@@ -4,7 +4,7 @@ use cottondata_driver::{
     ServerHealthMetrics, SshTunnel, TableDetail,
 };
 use cottondata_grid::{CellValue, ColumnMeta, ColumnarPage};
-use cottondata_sql::analyze_statement;
+use cottondata_sql::{analyze_statement, is_explainable_statement};
 use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts, Value};
@@ -184,6 +184,10 @@ impl DatabaseSession for MySqlSession {
                 let col_type = c.column_type();
                 ColumnMeta {
                     name: c.name_str().into_owned(),
+                    org_name: {
+                        let o = c.org_name_str();
+                        if o.is_empty() { None } else { Some(o.into_owned()) }
+                    },
                     table: {
                         let t = c.org_table_str();
                         if t.is_empty() { None } else { Some(t.into_owned()) }
@@ -194,9 +198,11 @@ impl DatabaseSession for MySqlSession {
                     },
                     type_name: mysql_type_label(col_type, flags),
                     is_primary_key: flags.contains(ColumnFlags::PRI_KEY_FLAG),
+                    is_unique_key: flags.contains(ColumnFlags::UNIQUE_KEY_FLAG),
                     is_nullable: !flags.contains(ColumnFlags::NOT_NULL_FLAG),
                     is_auto_increment: flags.contains(ColumnFlags::AUTO_INCREMENT_FLAG),
                     is_numeric: is_numeric_mysql_type(col_type),
+                    is_binary: flags.contains(ColumnFlags::BINARY_FLAG),
                 }
             })
             .collect();
@@ -239,23 +245,69 @@ impl DatabaseSession for MySqlSession {
         }
 
         let start = Instant::now();
-        self.conn
-            .query_drop("START TRANSACTION")
-            .map_err(mysql_error)?;
+        let use_savepoint = self.runtime.in_transaction || !self.runtime.autocommit;
+        if use_savepoint {
+            self.conn
+                .query_drop("SAVEPOINT cottondata_grid_batch")
+                .map_err(mysql_error)?;
+        } else {
+            self.conn
+                .query_drop("START TRANSACTION")
+                .map_err(mysql_error)?;
+        }
+
         for stmt in statements {
-            if let Err(err) = self.conn.query_drop(stmt) {
-                let _ = self.conn.query_drop("ROLLBACK");
-                return Err(mysql_error(err));
+            let trimmed = stmt.trim_start();
+            let upper_prefix = trimmed.get(..7).unwrap_or(trimmed).to_ascii_uppercase();
+            let expects_row_match = upper_prefix.starts_with("DELETE ");
+            let exec_res: Result<u64, DbError> = match self.conn.query_iter(stmt) {
+                Ok(result) => Ok(result.affected_rows()),
+                Err(err) => Err(mysql_error(err)),
+            };
+            match exec_res {
+                Ok(0) if expects_row_match => {
+                    if use_savepoint {
+                        let _ = self.conn.query_drop("ROLLBACK TO SAVEPOINT cottondata_grid_batch");
+                        let _ = self.conn.query_drop("RELEASE SAVEPOINT cottondata_grid_batch");
+                    } else {
+                        let _ = self.conn.query_drop("ROLLBACK");
+                    }
+                    return Err(DbError::message(
+                        "Row was modified or deleted on the server before saving (0 rows matched). Reload and retry.",
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    if use_savepoint {
+                        let _ = self.conn.query_drop("ROLLBACK TO SAVEPOINT cottondata_grid_batch");
+                        let _ = self.conn.query_drop("RELEASE SAVEPOINT cottondata_grid_batch");
+                    } else {
+                        let _ = self.conn.query_drop("ROLLBACK");
+                    }
+                    return Err(err);
+                }
             }
         }
-        self.conn
-            .query_drop("COMMIT")
-            .map_err(mysql_error)?;
-        self.runtime.in_transaction = false;
+
+        if use_savepoint {
+            self.conn
+                .query_drop("RELEASE SAVEPOINT cottondata_grid_batch")
+                .map_err(mysql_error)?;
+        } else {
+            self.conn
+                .query_drop("COMMIT")
+                .map_err(mysql_error)?;
+            self.runtime.in_transaction = false;
+        }
         Ok(start.elapsed().as_millis() as u64)
     }
 
     fn explain(&mut self, sql: &str, analyze: bool) -> Result<ExplainResult, DbError> {
+        if !is_explainable_statement(sql) {
+            return Err(DbError::message(
+                "EXPLAIN only supports SELECT, TABLE, INSERT, UPDATE, DELETE, REPLACE, or WITH statements. Use Run for SHOW / DESCRIBE / DDL statements.",
+            ));
+        }
         if analyze && !self.runtime.supports_explain_analyze() {
             return Err(DbError::message(format!(
                 "EXPLAIN ANALYZE requires MySQL 8.0.18+ (server is {})",

@@ -9,6 +9,57 @@ impl CottonDataApp {
     pub(super) fn render_modals(&mut self, ctx: &egui::Context, p: Palette) {
         self.render_sessions_modal(ctx, p);
 
+        if let Some(pending_action) = self.unsaved_guard_modal.clone() {
+            let (deletes, updates, inserts) = self.tabs[self.active_tab_idx].mutator.pending_summary();
+            let mut decision: Option<u8> = None;
+            egui::Window::new("Unsaved Cell Changes")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "You have uncommitted changes in this tab (D{deletes} · U{updates} · I{inserts})."
+                        ))
+                        .size(13.0)
+                        .color(p.text_primary),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Save your staged changes first, or discard them to continue.")
+                            .size(11.5)
+                            .color(p.text_muted),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if primary_button(ui, p, icon::FLOPPY_DISK, "Save & continue", true).clicked() {
+                            decision = Some(1);
+                        }
+                        if secondary_button(ui, p, icon::TRASH, "Discard", true).clicked() {
+                            decision = Some(2);
+                        }
+                        if secondary_button(ui, p, icon::X, "Cancel", true).clicked() {
+                            decision = Some(0);
+                        }
+                    });
+                });
+            match decision {
+                Some(1) => {
+                    self.unsaved_guard_modal = None;
+                    self.after_save_action = Some(pending_action);
+                    self.trigger_save_active_tab(false);
+                }
+                Some(2) => {
+                    self.unsaved_guard_modal = None;
+                    self.execute_pending_discard_action(pending_action);
+                }
+                Some(0) => {
+                    self.unsaved_guard_modal = None;
+                }
+                _ => {}
+            }
+        }
+
         if let Some((tab_id, script, statements)) = self.sql_preview_modal.clone() {
             let mut open = true;
             let mut submit_now = false;
@@ -38,6 +89,7 @@ impl CottonDataApp {
                         }
                         if secondary_button(ui, p, icon::X, "Cancel", true).clicked() {
                             self.sql_preview_modal = None;
+                            self.after_save_action = None;
                         }
                     });
                 });
@@ -51,6 +103,7 @@ impl CottonDataApp {
                 self.sql_preview_modal = None;
             } else if !open {
                 self.sql_preview_modal = None;
+                self.after_save_action = None;
             }
         }
 

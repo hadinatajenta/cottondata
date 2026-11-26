@@ -55,9 +55,24 @@ pub(super) fn row_badge(view: &ResultTableView, row: usize) -> String {
         format!("+{}", row - page_rows + 1)
     } else if view.mutator.is_deleted(row) {
         format!("-{}", row + 1)
+    } else if view.mutator.has_row_modifications(row) {
+        format!("*{}", row + 1)
     } else {
         (row + 1).to_string()
     }
+}
+
+pub(super) fn modified_cell_tooltip(view: &ResultTableView, row: usize, column: usize) -> Option<String> {
+    if row >= view.page.row_count {
+        return None;
+    }
+    let staged = view.mutator.get_modified(row, column)?;
+    let original = view.page.cell_value(row, column);
+    Some(format!(
+        "Original: {}\nStaged: {}",
+        truncate_display(original.as_display_str(), 120),
+        truncate_display(staged.as_display_str(), 120),
+    ))
 }
 
 fn cell_display(view: &ResultTableView, row: usize, column: usize) -> CellDisplay {
@@ -67,14 +82,14 @@ fn cell_display(view: &ResultTableView, row: usize, column: usize) -> CellDispla
         let value = &view.mutator.inserted_rows()[row - page.row_count][column];
         return CellDisplay {
             text: truncate_display(value.as_display_str(), MAX_RENDERED_CHARS),
-            is_null: value.is_null(),
+            is_null: value.is_null() || value.is_default(),
             background: palette.cell_inserted,
         };
     }
     if let Some(modified) = view.mutator.get_modified(row, column) {
         return CellDisplay {
             text: truncate_display(modified.as_display_str(), MAX_RENDERED_CHARS),
-            is_null: modified.is_null(),
+            is_null: modified.is_null() || modified.is_default(),
             background: palette.cell_modified,
         };
     }

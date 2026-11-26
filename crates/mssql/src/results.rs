@@ -10,13 +10,16 @@ fn column_meta(column: &Column) -> ColumnMeta {
     let column_type = column.column_type();
     ColumnMeta {
         name: column.name().to_string(),
+        org_name: None,
         table: None,
         schema: None,
         type_name: column_type_label(column_type).to_string(),
         is_primary_key: false,
+        is_unique_key: false,
         is_nullable: true,
         is_auto_increment: false,
         is_numeric: is_numeric_type(column_type),
+        is_binary: false,
     }
 }
 

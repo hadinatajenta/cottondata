@@ -18,6 +18,7 @@ pub fn document_tab(
     label: &str,
     is_active: bool,
     is_closable: bool,
+    env_accent: Option<egui::Color32>,
 ) -> DocumentTabResponse {
     let label_color = if is_active {
         palette.text_primary
@@ -59,6 +60,13 @@ pub fn document_tab(
                 Stroke::new(1.0, palette.border),
                 egui::StrokeKind::Inside,
             );
+            if let Some(accent) = env_accent {
+                let bar = Rect::from_min_max(
+                    egui::pos2(tab_rect.left() + 6.0, tab_rect.top() + 1.0),
+                    egui::pos2(tab_rect.right() - 6.0, tab_rect.top() + 3.0),
+                );
+                painter.rect_filled(bar, CornerRadius::same(1), accent);
+            }
             painter.hline(
                 tab_rect.x_range().shrink(1.0),
                 tab_rect.bottom() - 0.5,

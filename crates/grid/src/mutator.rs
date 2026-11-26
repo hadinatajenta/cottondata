@@ -134,6 +134,15 @@ impl StagedMutator {
         self.modified.remove(&(row, col));
     }
 
+    pub fn has_row_modifications(&self, row: usize) -> bool {
+        self.modified.keys().any(|(r, _)| *r == row)
+    }
+
+    pub fn revert_row(&mut self, row: usize) {
+        self.deleted_rows.remove(&row);
+        self.modified.retain(|(r, _), _| *r != row);
+    }
+
     pub fn revert_all(&mut self) {
         self.modified.clear();
         self.deleted_rows.clear();
@@ -149,13 +158,12 @@ impl StagedMutator {
         primary_key_cols: &[String],
     ) -> Result<PendingSqlBatch, String> {
         let fq_table = dialect.qualified_table(schema, table);
-        let pk_indices: Vec<usize> = primary_key_cols
-            .iter()
-            .filter_map(|pk| page.columns.iter().position(|c| c.name.eq_ignore_ascii_case(pk)))
-            .collect();
+        let pk_indices = resolve_key_indices(page, primary_key_cols);
 
-        if (!self.deleted_rows.is_empty() || !self.modified.is_empty()) && pk_indices.is_empty() {
-            return Err("Safe inline UPDATE/DELETE requires a Primary Key in the result set.".into());
+        if (!self.deleted_rows.is_empty() || !self.modified.is_empty())
+            && (pk_indices.is_empty() || pk_indices.len() != primary_key_cols.len())
+        {
+            return Err("Safe inline UPDATE/DELETE requires all Primary Key / Unique Key columns in the result set.".into());
         }
 
         let mut statements = Vec::new();
@@ -177,18 +185,28 @@ impl StagedMutator {
         }
 
         for (row, changes) in updates_by_row {
-            let set_clause = changes
-                .iter()
-                .map(|(col, val)| {
-                    let meta = &page.columns[*col];
-                    format!(
-                        "{} = {}",
-                        dialect.quote_ident(&meta.name),
-                        format_sql_literal(dialect, val, meta.is_numeric)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let mut assignments = Vec::with_capacity(changes.len());
+            for (col, val) in changes {
+                let meta = &page.columns[col];
+                if val.is_truncated() {
+                    return Err(format!(
+                        "Column `{}` holds a truncated preview (>4 KiB). Load the full value before saving.",
+                        meta.sql_column_name()
+                    ));
+                }
+                if val.is_null() && !meta.is_nullable {
+                    return Err(format!(
+                        "Column `{}` does not allow NULL values.",
+                        meta.sql_column_name()
+                    ));
+                }
+                assignments.push(format!(
+                    "{} = {}",
+                    dialect.quote_ident(meta.sql_column_name()),
+                    format_sql_literal_for_meta(dialect, val, meta)
+                ));
+            }
+            let set_clause = assignments.join(", ");
             let where_clause = build_pk_predicate(dialect, page, row, &pk_indices)?;
             statements.push(dialect.update_single_row(&fq_table, &set_clause, &where_clause));
             update_count += 1;
@@ -198,12 +216,21 @@ impl StagedMutator {
             let mut cols = Vec::new();
             let mut vals = Vec::new();
             for (idx, meta) in page.columns.iter().enumerate() {
-                let val = inserted.get(idx).unwrap_or(&CellValue::Null);
-                if meta.is_auto_increment && val.is_null() {
+                if meta.is_computed() {
                     continue;
                 }
-                cols.push(dialect.quote_ident(&meta.name));
-                vals.push(format_sql_literal(dialect, val, meta.is_numeric));
+                let val = inserted.get(idx).unwrap_or(&CellValue::Null);
+                if val.is_truncated() {
+                    return Err(format!(
+                        "Column `{}` holds a truncated preview (>4 KiB) and cannot be inserted.",
+                        meta.sql_column_name()
+                    ));
+                }
+                if (meta.is_auto_increment && val.is_null()) || val.is_default() {
+                    continue;
+                }
+                cols.push(dialect.quote_ident(meta.sql_column_name()));
+                vals.push(format_sql_literal_for_meta(dialect, val, meta));
             }
             if cols.is_empty() {
                 statements.push(dialect.insert_default_values(&fq_table));
@@ -226,6 +253,30 @@ impl StagedMutator {
     }
 }
 
+pub fn build_row_key_predicate(
+    dialect: SqlDialect,
+    page: &ColumnarPage,
+    row: usize,
+    key_columns: &[String],
+) -> Result<String, String> {
+    let pk_indices = resolve_key_indices(page, key_columns);
+    if pk_indices.is_empty() || pk_indices.len() != key_columns.len() {
+        return Err("Missing key columns in result set.".into());
+    }
+    build_pk_predicate(dialect, page, row, &pk_indices)
+}
+
+fn resolve_key_indices(page: &ColumnarPage, key_columns: &[String]) -> Vec<usize> {
+    key_columns
+        .iter()
+        .filter_map(|pk| {
+            page.columns
+                .iter()
+                .position(|c| c.sql_column_name().eq_ignore_ascii_case(pk))
+        })
+        .collect()
+}
+
 fn build_pk_predicate(
     dialect: SqlDialect,
     page: &ColumnarPage,
@@ -236,13 +287,13 @@ fn build_pk_predicate(
     for &idx in pk_indices {
         let meta = &page.columns[idx];
         let val = page.cell_value(row, idx);
+        let col_ident = dialect.quote_ident(meta.sql_column_name());
         if val.is_null() {
-            parts.push(format!("{} IS NULL", dialect.quote_ident(&meta.name)));
+            parts.push(format!("{col_ident} IS NULL"));
         } else {
             parts.push(format!(
-                "{} = {}",
-                dialect.quote_ident(&meta.name),
-                format_sql_literal(dialect, &val, meta.is_numeric)
+                "{col_ident} = {}",
+                format_sql_literal_for_meta(dialect, &val, meta)
             ));
         }
     }
@@ -252,14 +303,61 @@ fn build_pk_predicate(
 pub fn format_sql_literal(dialect: SqlDialect, val: &CellValue, is_numeric: bool) -> String {
     match val {
         CellValue::Null => "NULL".to_string(),
+        CellValue::DefaultExpr => "DEFAULT".to_string(),
         CellValue::Text(s) | CellValue::Truncated { preview: s, .. } => {
             if is_numeric && is_plain_number(s) {
-                s.clone()
+                s.trim().to_string()
             } else {
                 dialect.string_literal(s)
             }
         }
     }
+}
+
+fn format_sql_literal_for_meta(dialect: SqlDialect, val: &CellValue, meta: &crate::page::ColumnMeta) -> String {
+    match val {
+        CellValue::Null => "NULL".to_string(),
+        CellValue::DefaultExpr => "DEFAULT".to_string(),
+        CellValue::Text(s) | CellValue::Truncated { preview: s, .. } => {
+            let trimmed = s.trim();
+            if dialect == SqlDialect::MySql
+                && meta.type_name.eq_ignore_ascii_case("bit")
+                && is_mysql_bit_literal(trimmed)
+            {
+                return trimmed.to_string();
+            }
+            if (meta.is_binary || is_binary_type_name(&meta.type_name)) && is_hex_literal(trimmed) {
+                return trimmed.to_string();
+            }
+            if meta.is_numeric && is_plain_number(trimmed) {
+                return trimmed.to_string();
+            }
+            dialect.string_literal(s)
+        }
+    }
+}
+
+fn is_mysql_bit_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 4
+        && (bytes[0] == b'b' || bytes[0] == b'B')
+        && bytes[1] == b'\''
+        && bytes[bytes.len() - 1] == b'\''
+        && bytes[2..bytes.len() - 1].iter().all(|&b| b == b'0' || b == b'1')
+}
+
+fn is_hex_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 4
+        && bytes[0] == b'0'
+        && (bytes[1] == b'x' || bytes[1] == b'X')
+        && bytes[2..].len() % 2 == 0
+        && bytes[2..].iter().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_binary_type_name(type_name: &str) -> bool {
+    let lower = type_name.to_ascii_lowercase();
+    lower.contains("blob") || lower.contains("binary") || lower.contains("geometry")
 }
 
 fn is_plain_number(s: &str) -> bool {
@@ -293,23 +391,29 @@ mod tests {
         let cols = vec![
             ColumnMeta {
                 name: "id".into(),
+                org_name: Some("id".into()),
                 table: Some("users".into()),
                 schema: Some("shop".into()),
                 type_name: "int".into(),
                 is_primary_key: true,
+                is_unique_key: false,
                 is_nullable: false,
                 is_auto_increment: true,
                 is_numeric: true,
+                is_binary: false,
             },
             ColumnMeta {
                 name: "name".into(),
+                org_name: Some("name".into()),
                 table: Some("users".into()),
                 schema: Some("shop".into()),
                 type_name: "varchar(100)".into(),
                 is_primary_key: false,
+                is_unique_key: false,
                 is_nullable: false,
                 is_auto_increment: false,
                 is_numeric: false,
+                is_binary: false,
             },
         ];
         let mut page = ColumnarPage::new(cols, "SELECT * FROM users".into());
@@ -344,23 +448,29 @@ mod tests {
         let cols = vec![
             ColumnMeta {
                 name: "id".into(),
+                org_name: Some("id".into()),
                 table: Some("users".into()),
                 schema: Some("shop".into()),
                 type_name: "int".into(),
                 is_primary_key: true,
+                is_unique_key: false,
                 is_nullable: false,
                 is_auto_increment: true,
                 is_numeric: true,
+                is_binary: false,
             },
             ColumnMeta {
                 name: "path".into(),
+                org_name: Some("path".into()),
                 table: Some("users".into()),
                 schema: Some("shop".into()),
                 type_name: "nvarchar(100)".into(),
                 is_primary_key: false,
+                is_unique_key: false,
                 is_nullable: true,
                 is_auto_increment: false,
                 is_numeric: false,
+                is_binary: false,
             },
         ];
         let mut page = ColumnarPage::new(cols, "SELECT 1".into());
@@ -378,5 +488,90 @@ mod tests {
             "UPDATE TOP (1) [shop].[dbo].[users] SET [path] = N'C:\\temp\\it''s' WHERE [id] = 7"
         );
         assert_eq!(batch.statements[1], "INSERT INTO [shop].[dbo].[users] ([path]) VALUES (NULL)");
+    }
+
+    #[test]
+    fn uses_original_column_names_default_expr_bit_hex_and_rejects_not_null_violation() {
+        let cols = vec![
+            ColumnMeta {
+                name: "user_id".into(),
+                org_name: Some("id".into()),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "int".into(),
+                is_primary_key: true,
+                is_unique_key: false,
+                is_nullable: false,
+                is_auto_increment: true,
+                is_numeric: true,
+                is_binary: false,
+            },
+            ColumnMeta {
+                name: "display_name".into(),
+                org_name: Some("name".into()),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "varchar(64)".into(),
+                is_primary_key: false,
+                is_unique_key: false,
+                is_nullable: false,
+                is_auto_increment: false,
+                is_numeric: false,
+                is_binary: false,
+            },
+            ColumnMeta {
+                name: "flags".into(),
+                org_name: Some("flags".into()),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "bit".into(),
+                is_primary_key: false,
+                is_unique_key: false,
+                is_nullable: true,
+                is_auto_increment: false,
+                is_numeric: false,
+                is_binary: false,
+            },
+            ColumnMeta {
+                name: "digest".into(),
+                org_name: Some("digest".into()),
+                table: Some("users".into()),
+                schema: Some("shop".into()),
+                type_name: "blob".into(),
+                is_primary_key: false,
+                is_unique_key: false,
+                is_nullable: true,
+                is_auto_increment: false,
+                is_numeric: false,
+                is_binary: true,
+            },
+        ];
+        let mut page = ColumnarPage::new(cols, "SELECT id AS user_id, name AS display_name, flags, digest FROM users".into());
+        page.push_row(&[
+            CellValue::Text("10".into()),
+            CellValue::Text("Old".into()),
+            CellValue::Text("b'00000001'".into()),
+            CellValue::Text("0x00FF".into()),
+        ]);
+
+        let mut mutator = StagedMutator::new();
+        mutator.set_cell(&page, 0, 1, CellValue::DefaultExpr);
+        mutator.set_cell(&page, 0, 2, CellValue::Text("b'00000010'".into()));
+        mutator.set_cell(&page, 0, 3, CellValue::Text("0xCAFE".into()));
+        let batch = mutator
+            .build_pending_sql(SqlDialect::MySql, &page, "shop", "users", &["id".into()])
+            .unwrap();
+        assert_eq!(
+            batch.statements[0],
+            "UPDATE `shop`.`users` SET `name` = DEFAULT, `flags` = b'00000010', `digest` = 0xCAFE WHERE `id` = 10 LIMIT 1"
+        );
+
+        mutator.set_cell(&page, 0, 1, CellValue::Null);
+        assert!(mutator
+            .build_pending_sql(SqlDialect::MySql, &page, "shop", "users", &["id".into()])
+            .is_err());
+
+        mutator.revert_row(0);
+        assert!(!mutator.has_changes());
     }
 }

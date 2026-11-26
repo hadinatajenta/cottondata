@@ -1,5 +1,5 @@
 use super::query_tab::QueryTab;
-use super::CottonDataApp;
+use super::{CottonDataApp, PendingDiscardAction};
 use crate::worker::SlotCmd;
 use cottondata_core::ServerSlotId;
 use cottondata_sql::{split_statements, statement_at_offset};
@@ -35,6 +35,14 @@ impl CottonDataApp {
             },
         );
         self.persist_sessions_now();
+    }
+
+    pub(super) fn request_execute_active_tab(&mut self, run_all: bool) {
+        if self.tabs[self.active_tab_idx].mutator.has_changes() {
+            self.unsaved_guard_modal = Some(PendingDiscardAction::RunQuery(run_all));
+            return;
+        }
+        self.execute_active_tab(run_all);
     }
 
     pub(super) fn execute_active_tab(&mut self, run_all: bool) {

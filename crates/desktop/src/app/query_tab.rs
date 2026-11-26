@@ -13,6 +13,23 @@ pub(super) enum BottomDeckTab {
     History,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InlineCommitMove {
+    Stay,
+    Down,
+    Right,
+    Left,
+}
+
+#[derive(Clone)]
+pub(super) struct InlineCellEditor {
+    pub(super) row: usize,
+    pub(super) column: usize,
+    pub(super) buffer: String,
+    pub(super) needs_focus: bool,
+    pub(super) select_all: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct QueryTab {
     pub(super) id: u64,
@@ -27,14 +44,18 @@ pub(super) struct QueryTab {
     pub(super) is_running: bool,
     pub(super) mutator: StagedMutator,
     pub(super) selected_cell: Option<(usize, usize)>,
+    pub(super) inline_editor: Option<InlineCellEditor>,
     pub(super) cell_edit_buf: String,
     pub(super) cell_edit_is_null: bool,
+    pub(super) cell_edit_is_default: bool,
     pub(super) explain: Option<ExplainResult>,
     pub(super) column_widths: Vec<f32>,
     pub(super) row_selection: RowSelection,
     pub(super) is_inspector_open: bool,
     pub(super) is_counting_rows: bool,
     pub(super) is_submitting_mutations: bool,
+    pub(super) is_loading_full_cell: bool,
+    pub(super) show_sql_editor: bool,
 }
 
 impl QueryTab {
@@ -55,14 +76,18 @@ impl QueryTab {
             is_running: false,
             mutator: StagedMutator::new(),
             selected_cell: None,
+            inline_editor: None,
             cell_edit_buf: String::new(),
             cell_edit_is_null: false,
+            cell_edit_is_default: false,
             explain: None,
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
             is_counting_rows: false,
             is_submitting_mutations: false,
+            is_loading_full_cell: false,
+            show_sql_editor: true,
         }
     }
 
@@ -92,14 +117,18 @@ impl QueryTab {
             is_running: true,
             mutator: StagedMutator::new(),
             selected_cell: None,
+            inline_editor: None,
             cell_edit_buf: String::new(),
             cell_edit_is_null: false,
+            cell_edit_is_default: false,
             explain: None,
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
             is_counting_rows: false,
             is_submitting_mutations: false,
+            is_loading_full_cell: false,
+            show_sql_editor: false,
         }
     }
 
@@ -139,14 +168,18 @@ impl QueryTab {
             is_running: false,
             mutator: StagedMutator::new(),
             selected_cell: None,
+            inline_editor: None,
             cell_edit_buf: String::new(),
             cell_edit_is_null: false,
+            cell_edit_is_default: false,
             explain: None,
             column_widths: Vec::new(),
             row_selection: RowSelection::default(),
             is_inspector_open: false,
             is_counting_rows: false,
             is_submitting_mutations: false,
+            is_loading_full_cell: false,
+            show_sql_editor: state.bound_table.is_none(),
         }
     }
 
@@ -209,10 +242,112 @@ impl QueryTab {
         };
         self.selected_cell = Some((row, column));
         self.cell_edit_is_null = current_value.is_null();
-        self.cell_edit_buf = if current_value.is_null() {
+        self.cell_edit_is_default = current_value.is_default();
+        self.cell_edit_buf = if current_value.is_null() || current_value.is_default() {
             String::new()
         } else {
             current_value.as_display_str().to_string()
         };
+    }
+
+    pub(super) fn total_grid_rows(&self) -> usize {
+        self.page
+            .as_ref()
+            .map(|page| page.row_count + self.mutator.inserted_rows().len())
+            .unwrap_or(0)
+    }
+
+    pub(super) fn stage_cell_value(&mut self, row: usize, column: usize, new_val: CellValue) {
+        let Some(page) = &self.page else {
+            return;
+        };
+        if row >= page.row_count {
+            self.mutator.set_inserted_cell(row - page.row_count, column, new_val);
+        } else {
+            self.mutator.set_cell(page, row, column, new_val);
+        }
+        if self.selected_cell == Some((row, column)) {
+            self.select_cell(row, column);
+        }
+    }
+
+    pub(super) fn start_inline_edit(&mut self, row: usize, column: usize, initial_text: Option<String>) {
+        let Some(current_value) = self.cell_value(row, column) else {
+            return;
+        };
+        self.select_cell(row, column);
+        if initial_text.is_none()
+            && (current_value.is_truncated()
+                || (!current_value.is_null() && current_value.as_display_str().contains('\n')))
+        {
+            self.inline_editor = None;
+            self.is_inspector_open = true;
+            return;
+        }
+        let (buffer, select_all) = match initial_text {
+            Some(typed) => (typed, false),
+            None => {
+                let text = if current_value.is_null() || current_value.is_default() {
+                    String::new()
+                } else {
+                    current_value.as_display_str().to_string()
+                };
+                (text, true)
+            }
+        };
+        self.inline_editor = Some(InlineCellEditor {
+            row,
+            column,
+            buffer,
+            needs_focus: true,
+            select_all,
+        });
+    }
+
+    pub(super) fn commit_inline_edit(&mut self, movement: InlineCommitMove) {
+        let Some(editor) = self.inline_editor.take() else {
+            return;
+        };
+        let original = self.cell_value(editor.row, editor.column);
+        let unchanged_special = matches!(original, Some(CellValue::Null | CellValue::DefaultExpr))
+            && editor.buffer.is_empty();
+        if !unchanged_special {
+            self.stage_cell_value(editor.row, editor.column, CellValue::Text(editor.buffer));
+        }
+
+        let total_rows = self.total_grid_rows();
+        let col_count = self.page.as_ref().map(|p| p.columns.len()).unwrap_or(0);
+        if total_rows == 0 || col_count == 0 {
+            return;
+        }
+        let (next_row, next_col) = match movement {
+            InlineCommitMove::Stay => (editor.row, editor.column),
+            InlineCommitMove::Down => ((editor.row + 1).min(total_rows - 1), editor.column),
+            InlineCommitMove::Right => {
+                if editor.column + 1 < col_count {
+                    (editor.row, editor.column + 1)
+                } else if editor.row + 1 < total_rows {
+                    (editor.row + 1, 0)
+                } else {
+                    (editor.row, editor.column)
+                }
+            }
+            InlineCommitMove::Left => {
+                if editor.column > 0 {
+                    (editor.row, editor.column - 1)
+                } else if editor.row > 0 {
+                    (editor.row - 1, col_count - 1)
+                } else {
+                    (editor.row, editor.column)
+                }
+            }
+        };
+        self.select_cell(next_row, next_col);
+    }
+
+    pub(super) fn cancel_inline_edit(&mut self) {
+        if let Some(editor) = self.inline_editor.take() {
+            self.select_cell(editor.row, editor.column);
+        }
     }
 }

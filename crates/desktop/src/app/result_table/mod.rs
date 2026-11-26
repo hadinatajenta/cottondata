@@ -1,14 +1,15 @@
 mod cells;
 mod context_menu;
 
+use super::query_tab::{InlineCellEditor, InlineCommitMove};
 use super::row_selection::{RowSelectMode, RowSelection};
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
 use crate::ui_kit::icon;
 pub(super) use cells::compute_column_widths;
-use cells::{append_text, paint_cell, row_badge, single_line_galley};
+use cells::{append_text, modified_cell_tooltip, paint_cell, row_badge, single_line_galley};
 use context_menu::render_cell_context_menu;
-use cottondata_grid::{ColumnarPage, ExportFormat, SortDirection, StagedMutator};
+use cottondata_grid::{ColumnarPage, Editability, ExportFormat, SortDirection, StagedMutator};
 use eframe::egui::{self, text::LayoutJob, Align2, FontId, Rect, Sense, Stroke, Ui};
 
 const ROW_NUMBER_WIDTH: f32 = 56.0;
@@ -28,6 +29,7 @@ pub(super) struct ResultTableView<'a> {
     pub(super) column_widths: &'a [f32],
     pub(super) order_by: Option<&'a (String, SortDirection)>,
     pub(super) is_sortable: bool,
+    pub(super) editability: &'a Editability,
 }
 
 pub(super) enum TableAction {
@@ -39,6 +41,34 @@ pub(super) enum TableAction {
     SelectRow {
         row: usize,
         mode: RowSelectMode,
+    },
+    StartInlineEdit {
+        row: usize,
+        column: usize,
+    },
+    CommitInlineEdit(InlineCommitMove),
+    CancelInlineEdit,
+    PromoteInlineToInspector,
+    SetCellNull {
+        row: usize,
+        column: usize,
+    },
+    SetCellDefault {
+        row: usize,
+        column: usize,
+    },
+    RevertCell {
+        row: usize,
+        column: usize,
+    },
+    RevertRow {
+        row: usize,
+    },
+    CloneRow {
+        row: usize,
+    },
+    ToggleDeleteRow {
+        row: usize,
     },
     OpenInspector {
         row: usize,
@@ -58,7 +88,11 @@ pub(super) struct ResultTableInteraction {
     pub(super) clicked_header: Option<usize>,
 }
 
-pub(super) fn render_result_table(ui: &mut Ui, view: &ResultTableView) -> ResultTableInteraction {
+pub(super) fn render_result_table(
+    ui: &mut Ui,
+    view: &ResultTableView,
+    mut inline_editor: Option<&mut InlineCellEditor>,
+) -> ResultTableInteraction {
     let mut interaction = ResultTableInteraction::default();
     let total_width = ROW_NUMBER_WIDTH + view.column_widths.iter().sum::<f32>();
     let total_rows = view.page.row_count + view.mutator.inserted_rows().len();
@@ -86,7 +120,7 @@ pub(super) fn render_result_table(ui: &mut Ui, view: &ResultTableView) -> Result
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, total_rows, |ui, row_range| {
                 for row in row_range {
-                    if let Some(action) = paint_body_row(ui, view, row, total_width) {
+                    if let Some(action) = paint_body_row(ui, view, row, total_width, inline_editor.as_deref_mut()) {
                         interaction.action = Some(action);
                     }
                 }
@@ -176,7 +210,13 @@ fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32) -> Op
     clicked_header
 }
 
-fn paint_body_row(ui: &mut Ui, view: &ResultTableView, row: usize, total_width: f32) -> Option<TableAction> {
+fn paint_body_row(
+    ui: &mut Ui,
+    view: &ResultTableView,
+    row: usize,
+    total_width: f32,
+    mut inline_editor: Option<&mut InlineCellEditor>,
+) -> Option<TableAction> {
     let palette = view.palette;
     let (row_rect, _) = ui.allocate_exact_size(egui::vec2(total_width, ROW_HEIGHT), Sense::hover());
     let is_row_selected = view.row_selection.contains(row);
@@ -210,10 +250,24 @@ fn paint_body_row(ui: &mut Ui, view: &ResultTableView, row: usize, total_width: 
     );
 
     for (column_index, cell_rect) in visible_columns(ui, row_rect, view) {
+        let is_editing_here = inline_editor
+            .as_deref()
+            .is_some_and(|editor| editor.row == row && editor.column == column_index);
+        if is_editing_here {
+            if let Some(editor) = inline_editor.as_deref_mut() {
+                if let Some(edit_action) = render_inline_cell_editor(ui, view, cell_rect, editor) {
+                    action = Some(edit_action);
+                }
+            }
+            continue;
+        }
         paint_cell(ui, view, row, column_index, cell_rect, row_highlight.is_some());
         let response = ui.interact(cell_rect, ui.id().with(("cell", row, column_index)), Sense::click());
         if let Some(cell_action) = cell_response_action(ui, view, &response, row, column_index) {
             action = Some(cell_action);
+        }
+        if let Some(tooltip) = modified_cell_tooltip(view, row, column_index) {
+            response.clone().on_hover_text(tooltip);
         }
         response.context_menu(|ui| {
             if let Some(menu_action) = render_cell_context_menu(ui, view, row, column_index) {
@@ -231,6 +285,82 @@ fn paint_body_row(ui: &mut Ui, view: &ResultTableView, row: usize, total_width: 
     action
 }
 
+fn render_inline_cell_editor(
+    ui: &mut Ui,
+    view: &ResultTableView,
+    cell_rect: Rect,
+    editor: &mut InlineCellEditor,
+) -> Option<TableAction> {
+    let palette = view.palette;
+    ui.painter().rect_filled(cell_rect, 0.0, palette.bg_card);
+    ui.painter().rect_stroke(
+        cell_rect.shrink(0.5),
+        0.0,
+        Stroke::new(1.5, palette.accent),
+        egui::StrokeKind::Inside,
+    );
+
+    let was_newly_focused = editor.needs_focus;
+    let inner_rect = cell_rect.shrink2(egui::vec2(5.0, 2.0));
+    let mut output = ui
+        .allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
+            egui::TextEdit::singleline(&mut editor.buffer)
+                .id(egui::Id::new(("inline_cell_editor", view.tab_id, editor.row, editor.column)))
+                .font(FontId::monospace(CELL_FONT_SIZE))
+                .frame(false)
+                .desired_width(f32::INFINITY)
+                .show(ui)
+        })
+        .inner;
+
+    if editor.needs_focus {
+        output.response.request_focus();
+        if editor.select_all {
+            let char_len = editor.buffer.chars().count();
+            output.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(char_len),
+            )));
+            output.state.store(ui.ctx(), output.response.id);
+        }
+        editor.needs_focus = false;
+        return None;
+    }
+
+    if was_newly_focused {
+        return None;
+    }
+
+    let (esc, shift_enter, enter, tab, shift_tab) = ui.ctx().input_mut(|input| {
+        let esc = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        let shift_enter = input.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
+        let enter = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        let shift_tab = input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+        let tab = input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+        (esc, shift_enter, enter, tab, shift_tab)
+    });
+
+    if esc {
+        return Some(TableAction::CancelInlineEdit);
+    }
+    if shift_enter {
+        return Some(TableAction::PromoteInlineToInspector);
+    }
+    if enter {
+        return Some(TableAction::CommitInlineEdit(InlineCommitMove::Down));
+    }
+    if shift_tab {
+        return Some(TableAction::CommitInlineEdit(InlineCommitMove::Left));
+    }
+    if tab {
+        return Some(TableAction::CommitInlineEdit(InlineCommitMove::Right));
+    }
+    if output.response.lost_focus() {
+        return Some(TableAction::CommitInlineEdit(InlineCommitMove::Stay));
+    }
+    None
+}
+
 fn cell_response_action(
     ui: &Ui,
     view: &ResultTableView,
@@ -239,6 +369,9 @@ fn cell_response_action(
     column: usize,
 ) -> Option<TableAction> {
     if response.double_clicked() {
+        if view.editability.is_column_editable(column) {
+            return Some(TableAction::StartInlineEdit { row, column });
+        }
         return Some(TableAction::OpenInspector { row, column });
     }
     if response.clicked() {

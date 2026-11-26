@@ -22,13 +22,25 @@ impl StatementSafety {
     }
 }
 
+pub fn is_explainable_statement(sql: &str) -> bool {
+    let first = tokenize(sql)
+        .into_iter()
+        .find(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment) && t.text != "(")
+        .map(|t| t.text.to_ascii_uppercase());
+    matches!(
+        first.as_deref(),
+        Some("SELECT" | "TABLE" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH")
+    )
+}
+
 pub fn analyze_statement(sql: &str) -> StatementSafety {
     let tokens: Vec<_> = tokenize(sql)
         .into_iter()
         .filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment))
         .collect();
 
-    if tokens.is_empty() {
+    let first_idx = tokens.iter().position(|t| t.text != "(").unwrap_or(0);
+    if tokens.is_empty() || first_idx >= tokens.len() {
         return StatementSafety {
             class: WriteClass::ReadOnly,
             warning: None,
@@ -36,13 +48,13 @@ pub fn analyze_statement(sql: &str) -> StatementSafety {
         };
     }
 
-    let first = tokens[0].text.to_ascii_uppercase();
-    let second = tokens.get(1).map(|t| t.text.to_ascii_uppercase());
+    let first = tokens[first_idx].text.to_ascii_uppercase();
+    let second = tokens.get(first_idx + 1).map(|t| t.text.to_ascii_uppercase());
     let has_where = tokens.iter().any(|t| t.text.eq_ignore_ascii_case("WHERE"));
     let has_limit = tokens.iter().any(|t| t.text.eq_ignore_ascii_case("LIMIT"));
 
     match first.as_str() {
-        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "HELP" => StatementSafety {
+        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "HELP" | "TABLE" | "VALUES" => StatementSafety {
             class: WriteClass::ReadOnly,
             warning: None,
             affected_table: None,
@@ -199,5 +211,13 @@ mod tests {
         let sel = analyze_statement("SELECT * FROM users");
         assert!(sel.allowed_in_read_only());
         assert!(!safe_upd.allowed_in_read_only());
+
+        let union_sel = analyze_statement("(SELECT 1) UNION (SELECT 2)");
+        assert!(union_sel.allowed_in_read_only());
+        assert!(analyze_statement("TABLE users").allowed_in_read_only());
+        assert!(is_explainable_statement("SELECT * FROM users"));
+        assert!(is_explainable_statement("(SELECT 1) UNION (SELECT 2)"));
+        assert!(!is_explainable_statement("SHOW CREATE TABLE merchant_data"));
+        assert!(!is_explainable_statement("EXPLAIN SELECT 1"));
     }
 }

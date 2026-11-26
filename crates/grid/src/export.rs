@@ -219,13 +219,16 @@ mod tests {
     fn column(name: &str, is_numeric: bool) -> ColumnMeta {
         ColumnMeta {
             name: name.into(),
+            org_name: Some(name.into()),
             table: Some("users".into()),
             schema: Some("app".into()),
             type_name: if is_numeric { "int".into() } else { "varchar(64)".into() },
             is_primary_key: false,
+            is_unique_key: false,
             is_nullable: true,
             is_auto_increment: false,
             is_numeric,
+            is_binary: false,
         }
     }
 

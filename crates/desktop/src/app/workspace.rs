@@ -33,22 +33,47 @@ impl CottonDataApp {
                     ui.add_space(f32::from(GUTTER));
                 }
 
-                card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    self.render_document_tabs(ui, palette);
-                    egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
-                        self.render_sql_editor_section(ui, palette);
+                let show_sql_editor = self.tabs[self.active_tab_idx].show_sql_editor;
+                if show_sql_editor {
+                    card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        self.render_document_tabs(ui, palette);
+                        egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
+                            self.render_sql_editor_section(ui, palette);
+                        });
                     });
-                });
-                ui.add_space(f32::from(GUTTER));
-                card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    self.render_result_tabs(ui, palette);
-                    egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
+
+                    let (splitter_rect, splitter_resp) =
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), f32::from(GUTTER)), egui::Sense::drag());
+                    if splitter_resp.hovered() || splitter_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        let handle = egui::Rect::from_center_size(splitter_rect.center(), egui::vec2(48.0, 3.0));
+                        ui.painter().rect_filled(handle, CornerRadius::same(2), palette.accent);
+                    }
+                    if splitter_resp.dragged() {
+                        let max_h = (ctx.screen_rect().height() * 0.55).max(200.0);
+                        self.editor_height = (self.editor_height + splitter_resp.drag_delta().y).clamp(90.0, max_h);
+                    }
+
+                    card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
-                        self.render_result_content(ui, palette);
+                        self.render_result_tabs(ui, palette);
+                        egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.render_result_content(ui, palette);
+                        });
                     });
-                });
+                } else {
+                    card_frame(palette).inner_margin(Margin::ZERO).show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.render_document_tabs(ui, palette);
+                        self.render_result_tabs(ui, palette);
+                        egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.render_result_content(ui, palette);
+                        });
+                    });
+                }
             });
     }
 
@@ -81,10 +106,18 @@ impl CottonDataApp {
                                     } else {
                                         icon::TERMINAL_WINDOW
                                     };
+                                    let dirty_mark = if tab.mutator.has_changes() { "• " } else { "" };
                                     let label = match tab.slot {
-                                        Some(slot) => format!("{slot} {}", tab.title),
-                                        None => tab.title.clone(),
+                                        Some(slot) => format!("{dirty_mark}{slot} {}", tab.title),
+                                        None => format!("{dirty_mark}{}", tab.title),
                                     };
+                                    let env_accent = tab
+                                        .slot
+                                        .and_then(|s| self.registry.get(s))
+                                        .map(|sl| {
+                                            let [r, g, b] = sl.profile.environment.rgb();
+                                            egui::Color32::from_rgb(r, g, b)
+                                        });
                                     let response = document_tab(
                                         ui,
                                         palette,
@@ -92,6 +125,7 @@ impl CottonDataApp {
                                         &label,
                                         idx == self.active_tab_idx,
                                         is_closable,
+                                        env_accent,
                                     );
                                     if response.is_close_clicked {
                                         closed_tab = Some(idx);

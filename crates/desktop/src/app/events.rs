@@ -90,9 +90,11 @@ impl CottonDataApp {
                             tab.is_running = false;
                             tab.is_counting_rows = false;
                             tab.is_submitting_mutations = false;
+                            tab.is_loading_full_cell = false;
                             tab.last_status_msg = format!("Error: {msg}");
                         }
                     }
+                    self.after_save_action = None;
                     self.toast_banner = Some((msg, true));
                 }
                 WorkerEvent::CatalogUpdated { slot, catalog } => {
@@ -135,6 +137,7 @@ impl CottonDataApp {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_running = false;
                         tab.mutator.revert_all();
+                        tab.inline_editor = None;
                         tab.selected_cell = None;
                         match outcome {
                             QueryOutcome::Rows(page) => {
@@ -198,23 +201,73 @@ impl CottonDataApp {
                     elapsed_ms,
                 } => {
                     self.toast_banner = Some((
-                        format!("Committed {statement_count} SQL mutations in {elapsed_ms} ms"),
+                        format!("Saved {statement_count} SQL mutation(s) in {elapsed_ms} ms"),
                         false,
                     ));
+                    let max_rows = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
+                    let pending_after = self.after_save_action.take();
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_submitting_mutations = false;
                         tab.mutator.revert_all();
-                        if let Some((schema, table)) = tab.bound_table.clone() {
-                            tab.is_running = true;
-                            self.hub.send(
-                                slot,
-                                SlotCmd::LoadTablePage {
-                                    tab_id,
-                                    schema,
-                                    table,
-                                    filter_sort: tab.filter_sort.clone(),
-                                },
-                            );
+                        tab.inline_editor = None;
+                        if pending_after.is_none() {
+                            if let Some((schema, table)) = tab.bound_table.clone() {
+                                tab.is_running = true;
+                                self.hub.send(
+                                    slot,
+                                    SlotCmd::LoadTablePage {
+                                        tab_id,
+                                        schema,
+                                        table,
+                                        filter_sort: tab.filter_sort.clone(),
+                                    },
+                                );
+                            } else if let Some(executed_sql) = tab
+                                .page
+                                .as_ref()
+                                .map(|page| page.executed_sql.clone())
+                                .filter(|sql| !sql.trim().is_empty())
+                            {
+                                tab.is_running = true;
+                                self.hub.send(
+                                    slot,
+                                    SlotCmd::ExecuteSql {
+                                        tab_id,
+                                        sql: executed_sql,
+                                        max_rows,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    if let Some(action) = pending_after {
+                        self.execute_pending_discard_action(action);
+                    }
+                }
+                WorkerEvent::FullCellLoaded {
+                    tab_id,
+                    row,
+                    column,
+                    value,
+                } => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.is_loading_full_cell = false;
+                        if tab.selected_cell == Some((row, column)) {
+                            match value {
+                                Some(full_text) => {
+                                    tab.cell_edit_is_null = false;
+                                    tab.cell_edit_is_default = false;
+                                    tab.cell_edit_buf = full_text;
+                                    tab.is_inspector_open = true;
+                                    tab.last_status_msg = "Loaded full cell value into inspector".into();
+                                }
+                                None => {
+                                    tab.cell_edit_is_null = true;
+                                    tab.cell_edit_is_default = false;
+                                    tab.cell_edit_buf.clear();
+                                    tab.is_inspector_open = true;
+                                }
+                            }
                         }
                     }
                 }
