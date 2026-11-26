@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod column_glyph;
 mod theme;
+mod ui_kit;
 mod worker;
 
 use eframe::egui;

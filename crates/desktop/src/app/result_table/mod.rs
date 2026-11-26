@@ -1,0 +1,265 @@
+mod cells;
+mod context_menu;
+
+use super::row_selection::{RowSelectMode, RowSelection};
+use crate::column_glyph::column_type_glyph;
+use crate::theme::Palette;
+use crate::ui_kit::icon;
+pub(super) use cells::compute_column_widths;
+use cells::{append_text, paint_cell, row_badge, single_line_galley};
+use context_menu::render_cell_context_menu;
+use cottondata_grid::{ColumnarPage, ExportFormat, SortDirection, StagedMutator};
+use eframe::egui::{self, text::LayoutJob, Align2, FontId, Rect, Sense, Stroke, Ui};
+
+const ROW_NUMBER_WIDTH: f32 = 56.0;
+const HEADER_HEIGHT: f32 = 30.0;
+const ROW_HEIGHT: f32 = 26.0;
+const CELL_PADDING_X: f32 = 8.0;
+const CELL_FONT_SIZE: f32 = 12.0;
+
+pub(super) struct ResultTableView<'a> {
+    pub(super) palette: Palette,
+    pub(super) tab_id: u64,
+    pub(super) page: &'a ColumnarPage,
+    pub(super) mutator: &'a StagedMutator,
+    pub(super) focused_cell: Option<(usize, usize)>,
+    pub(super) row_selection: &'a RowSelection,
+    pub(super) selected_row_count: usize,
+    pub(super) column_widths: &'a [f32],
+    pub(super) order_by: Option<&'a (String, SortDirection)>,
+    pub(super) is_sortable: bool,
+}
+
+pub(super) enum TableAction {
+    SelectCell {
+        row: usize,
+        column: usize,
+        mode: RowSelectMode,
+    },
+    SelectRow {
+        row: usize,
+        mode: RowSelectMode,
+    },
+    OpenInspector {
+        row: usize,
+        column: usize,
+    },
+    CopyValue {
+        row: usize,
+        column: usize,
+    },
+    CopyRows(ExportFormat),
+    SelectAll,
+}
+
+#[derive(Default)]
+pub(super) struct ResultTableInteraction {
+    pub(super) action: Option<TableAction>,
+    pub(super) clicked_header: Option<usize>,
+}
+
+pub(super) fn render_result_table(ui: &mut Ui, view: &ResultTableView) -> ResultTableInteraction {
+    let mut interaction = ResultTableInteraction::default();
+    let total_width = ROW_NUMBER_WIDTH + view.column_widths.iter().sum::<f32>();
+    let total_rows = view.page.row_count + view.mutator.inserted_rows().len();
+    let offset_memory_id = egui::Id::new(("result_table_offset_x", view.tab_id));
+    let previous_offset_x = ui
+        .ctx()
+        .data(|memory| memory.get_temp::<f32>(offset_memory_id))
+        .unwrap_or(0.0);
+
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        egui::ScrollArea::horizontal()
+            .id_salt(("result_table_header", view.tab_id))
+            .horizontal_scroll_offset(previous_offset_x)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .enable_scrolling(false)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                interaction.clicked_header = paint_header_row(ui, view, total_width);
+            });
+
+        let body = egui::ScrollArea::both()
+            .id_salt(("result_table_body", view.tab_id))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .auto_shrink([false, false])
+            .show_rows(ui, ROW_HEIGHT, total_rows, |ui, row_range| {
+                for row in row_range {
+                    if let Some(action) = paint_body_row(ui, view, row, total_width) {
+                        interaction.action = Some(action);
+                    }
+                }
+            });
+
+        let current_offset_x = body.state.offset.x;
+        if (current_offset_x - previous_offset_x).abs() > f32::EPSILON {
+            ui.ctx()
+                .data_mut(|memory| memory.insert_temp(offset_memory_id, current_offset_x));
+            ui.ctx().request_repaint();
+        }
+    });
+    interaction
+}
+
+fn visible_columns<'a>(ui: &Ui, row_rect: Rect, view: &'a ResultTableView) -> impl Iterator<Item = (usize, Rect)> + 'a {
+    let clip = ui.clip_rect();
+    let mut column_left = row_rect.left() + ROW_NUMBER_WIDTH;
+    view.column_widths
+        .iter()
+        .enumerate()
+        .map(move |(column_index, width)| {
+            let cell_rect = Rect::from_min_size(
+                egui::pos2(column_left, row_rect.top()),
+                egui::vec2(*width, row_rect.height()),
+            );
+            column_left += width;
+            (column_index, cell_rect)
+        })
+        .filter(move |(_, cell_rect)| cell_rect.right() >= clip.left() && cell_rect.left() <= clip.right())
+}
+
+fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32) -> Option<usize> {
+    let palette = view.palette;
+    let (row_rect, _) = ui.allocate_exact_size(egui::vec2(total_width, HEADER_HEIGHT), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(row_rect, 0.0, palette.bg_surface);
+    painter.text(
+        egui::pos2(row_rect.left() + ROW_NUMBER_WIDTH / 2.0, row_rect.center().y),
+        Align2::CENTER_CENTER,
+        icon::HASH,
+        FontId::proportional(CELL_FONT_SIZE),
+        palette.text_muted,
+    );
+
+    let mut clicked_header = None;
+    for (column_index, cell_rect) in visible_columns(ui, row_rect, view) {
+        let column = &view.page.columns[column_index];
+        let response = ui.interact(cell_rect, ui.id().with(("header", column_index)), Sense::click());
+        if response.hovered() && view.is_sortable {
+            ui.painter().rect_filled(cell_rect, 0.0, palette.bg_hover);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let (glyph, glyph_color) = if column.is_primary_key {
+            (icon::KEY, palette.warning)
+        } else {
+            (column_type_glyph(&column.type_name), palette.text_muted)
+        };
+        let sort_glyph = match view.order_by {
+            Some((name, SortDirection::Asc)) if name == &column.name => icon::SORT_ASCENDING,
+            Some((name, SortDirection::Desc)) if name == &column.name => icon::SORT_DESCENDING,
+            _ => "",
+        };
+        let mut job = LayoutJob::default();
+        let header_font = FontId::proportional(CELL_FONT_SIZE);
+        append_text(&mut job, glyph, header_font.clone(), glyph_color, 0.0);
+        append_text(&mut job, &column.name, header_font.clone(), palette.text_primary, 6.0);
+        append_text(&mut job, sort_glyph, header_font, palette.accent, 6.0);
+        let galley = single_line_galley(ui, job, cell_rect.width() - CELL_PADDING_X * 2.0);
+        let text_pos = egui::pos2(
+            cell_rect.left() + CELL_PADDING_X,
+            cell_rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(text_pos, galley, palette.text_primary);
+        if response.clicked() {
+            clicked_header = Some(column_index);
+        }
+        response.on_hover_text(&column.type_name);
+    }
+
+    paint_grid_lines(ui, view, row_rect);
+    ui.painter().hline(
+        row_rect.x_range(),
+        row_rect.bottom() - 0.5,
+        Stroke::new(1.0, palette.border),
+    );
+    clicked_header
+}
+
+fn paint_body_row(ui: &mut Ui, view: &ResultTableView, row: usize, total_width: f32) -> Option<TableAction> {
+    let palette = view.palette;
+    let (row_rect, _) = ui.allocate_exact_size(egui::vec2(total_width, ROW_HEIGHT), Sense::hover());
+    let is_row_selected = view.row_selection.contains(row);
+    let is_row_hovered = ui.rect_contains_pointer(row_rect);
+    let row_highlight = if is_row_selected {
+        Some(palette.accent_soft)
+    } else {
+        is_row_hovered.then_some(palette.bg_hover)
+    };
+    if let Some(highlight) = row_highlight {
+        ui.painter().rect_filled(row_rect, 0.0, highlight);
+    }
+
+    let mut action = None;
+    let number_rect = Rect::from_min_size(row_rect.min, egui::vec2(ROW_NUMBER_WIDTH, ROW_HEIGHT));
+    let number_response = ui.interact(number_rect, ui.id().with(("row_number", row)), Sense::click());
+    if number_response.clicked() {
+        let mode = RowSelectMode::from_modifiers(ui.input(|input| input.modifiers));
+        action = Some(TableAction::SelectRow { row, mode });
+    }
+    ui.painter().text(
+        egui::pos2(row_rect.left() + ROW_NUMBER_WIDTH - CELL_PADDING_X, row_rect.center().y),
+        Align2::RIGHT_CENTER,
+        row_badge(view, row),
+        FontId::monospace(11.0),
+        if is_row_selected {
+            palette.accent
+        } else {
+            palette.text_muted
+        },
+    );
+
+    for (column_index, cell_rect) in visible_columns(ui, row_rect, view) {
+        paint_cell(ui, view, row, column_index, cell_rect, row_highlight.is_some());
+        let response = ui.interact(cell_rect, ui.id().with(("cell", row, column_index)), Sense::click());
+        if let Some(cell_action) = cell_response_action(ui, view, &response, row, column_index) {
+            action = Some(cell_action);
+        }
+        response.context_menu(|ui| {
+            if let Some(menu_action) = render_cell_context_menu(ui, view, row, column_index) {
+                action = Some(menu_action);
+            }
+        });
+    }
+
+    paint_grid_lines(ui, view, row_rect);
+    ui.painter().hline(
+        row_rect.x_range(),
+        row_rect.bottom() - 0.5,
+        Stroke::new(1.0, palette.divider),
+    );
+    action
+}
+
+fn cell_response_action(
+    ui: &Ui,
+    view: &ResultTableView,
+    response: &egui::Response,
+    row: usize,
+    column: usize,
+) -> Option<TableAction> {
+    if response.double_clicked() {
+        return Some(TableAction::OpenInspector { row, column });
+    }
+    if response.clicked() {
+        let mode = RowSelectMode::from_modifiers(ui.input(|input| input.modifiers));
+        return Some(TableAction::SelectCell { row, column, mode });
+    }
+    if response.secondary_clicked() && !view.row_selection.contains(row) {
+        return Some(TableAction::SelectCell {
+            row,
+            column,
+            mode: RowSelectMode::Replace,
+        });
+    }
+    None
+}
+
+fn paint_grid_lines(ui: &Ui, view: &ResultTableView, row_rect: Rect) {
+    let stroke = Stroke::new(1.0, view.palette.divider);
+    ui.painter()
+        .vline(row_rect.left() + ROW_NUMBER_WIDTH - 0.5, row_rect.y_range(), stroke);
+    for (_, cell_rect) in visible_columns(ui, row_rect, view) {
+        ui.painter().vline(cell_rect.right() - 0.5, row_rect.y_range(), stroke);
+    }
+}

@@ -14,6 +14,7 @@ pub enum SlotCmd {
         password: Option<String>,
     },
     Disconnect,
+    Ping,
     LoadSchemaL1 {
         schema: String,
     },
@@ -64,6 +65,9 @@ pub enum WorkerEvent {
         catalog: SchemaCatalog,
     },
     Disconnected {
+        slot: ServerSlotId,
+    },
+    ConnectionLost {
         slot: ServerSlotId,
     },
     Error {
@@ -255,6 +259,17 @@ fn slot_worker_loop(
                 catalog = SchemaCatalog::new();
                 emit(&tx, &ctx, WorkerEvent::Disconnected { slot });
             }
+            SlotCmd::Ping => {
+                let is_dead = match session.as_mut() {
+                    Some(sess) => sess.ping().is_err(),
+                    None => false,
+                };
+                if is_dead {
+                    session = None;
+                    catalog = SchemaCatalog::new();
+                    emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                }
+            }
             SlotCmd::LoadSchemaL1 { schema } => {
                 let Some(sess) = session.as_mut() else {
                     emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: MySqlError::message("Not connected") });
@@ -302,7 +317,15 @@ fn slot_worker_loop(
                             },
                         );
                     }
-                    Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
+                    Err(error) => {
+                        let lost = is_connection_lost(&error);
+                        emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
+                        if lost {
+                            session = None;
+                            catalog = SchemaCatalog::new();
+                            emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                        }
+                    }
                 }
             }
             SlotCmd::LoadTablePage {
@@ -327,7 +350,15 @@ fn slot_worker_loop(
                             },
                         );
                     }
-                    Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error }),
+                    Err(error) => {
+                        let lost = is_connection_lost(&error);
+                        emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
+                        if lost {
+                            session = None;
+                            catalog = SchemaCatalog::new();
+                            emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                        }
+                    }
                 }
             }
             SlotCmd::CountTableRows {
@@ -447,4 +478,17 @@ fn slot_worker_loop(
 
 fn clone_catalog_light(catalog: &SchemaCatalog, _sess: &mut MySqlSession) -> SchemaCatalog {
     catalog.snapshot()
+}
+
+fn is_connection_lost(err: &MySqlError) -> bool {
+    if matches!(err.diagnostic.code, Some(2006) | Some(2013)) {
+        return true;
+    }
+    let lower = err.diagnostic.raw_message.to_ascii_lowercase();
+    lower.contains("server has gone away")
+        || lower.contains("lost connection")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset")
+        || lower.contains("unexpected eof")
+        || lower.contains("closed connection")
 }

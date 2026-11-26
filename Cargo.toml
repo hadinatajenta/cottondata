@@ -29,6 +29,7 @@ cottondata-storage = { path = "crates/storage" }
 
 eframe = { version = "=0.31.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 rfd = { version = "=0.15.3", default-features = false }
+egui-phosphor = { version = "=0.9.0", default-features = false, features = ["regular"] }
 mysql = { version = "26.0.1", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
 mimalloc = "0.1.48"
 lasso = "0.7.3"

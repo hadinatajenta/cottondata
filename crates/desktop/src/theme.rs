@@ -1,26 +1,39 @@
 use cottondata_sql::{tokenize, TokenKind};
-use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextFormat, Visuals};
+use eframe::egui::{
+    self, epaint::Shadow, Color32, CornerRadius, FontFamily, FontId, Stroke, TextFormat, TextStyle, Visuals,
+};
+
+pub const RADIUS_CARD: u8 = 10;
+pub const RADIUS_CONTROL: u8 = 6;
+pub const GUTTER: i8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlassTheme {
-    DarkGlass,
-    LightGlass,
+pub enum AppTheme {
+    Light,
+    Dark,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    pub bg_canvas: Color32,
-    pub bg_panel: Color32,
+    pub bg_backdrop: Color32,
+    pub bg_card: Color32,
     pub bg_surface: Color32,
-    pub bg_elevated: Color32,
-    pub glass_border: Color32,
+    pub bg_hover: Color32,
+    pub border: Color32,
+    pub divider: Color32,
+    pub dot_grid: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
     pub accent: Color32,
     pub accent_soft: Color32,
+    pub on_accent: Color32,
+    pub highlight: Color32,
     pub success: Color32,
     pub warning: Color32,
     pub danger: Color32,
+    pub icon_schema: Color32,
+    pub icon_table: Color32,
+    pub icon_view: Color32,
     pub row_alt: Color32,
     pub cell_modified: Color32,
     pub cell_inserted: Color32,
@@ -33,102 +46,187 @@ pub struct Palette {
     pub sql_sysvar: Color32,
 }
 
-impl GlassTheme {
+const LIGHT_PALETTE: Palette = Palette {
+    bg_backdrop: Color32::from_rgb(236, 238, 246),
+    bg_card: Color32::from_rgb(255, 255, 255),
+    bg_surface: Color32::from_rgb(247, 248, 251),
+    bg_hover: Color32::from_rgb(239, 241, 248),
+    border: Color32::from_rgb(225, 228, 238),
+    divider: Color32::from_rgb(233, 235, 242),
+    dot_grid: Color32::from_rgb(214, 218, 230),
+    text_primary: Color32::from_rgb(28, 32, 48),
+    text_muted: Color32::from_rgb(110, 116, 138),
+    accent: Color32::from_rgb(64, 70, 226),
+    accent_soft: Color32::from_rgb(234, 235, 253),
+    on_accent: Color32::from_rgb(255, 255, 255),
+    highlight: Color32::from_rgb(238, 120, 138),
+    success: Color32::from_rgb(30, 146, 98),
+    warning: Color32::from_rgb(184, 120, 14),
+    danger: Color32::from_rgb(210, 58, 76),
+    icon_schema: Color32::from_rgb(226, 86, 108),
+    icon_table: Color32::from_rgb(58, 104, 222),
+    icon_view: Color32::from_rgb(132, 88, 232),
+    row_alt: Color32::from_rgb(250, 251, 253),
+    cell_modified: Color32::from_rgb(253, 240, 210),
+    cell_inserted: Color32::from_rgb(222, 245, 233),
+    cell_deleted: Color32::from_rgb(252, 226, 230),
+    sql_keyword: Color32::from_rgb(64, 70, 226),
+    sql_string: Color32::from_rgb(22, 132, 78),
+    sql_number: Color32::from_rgb(176, 102, 12),
+    sql_comment: Color32::from_rgb(132, 140, 162),
+    sql_ident: Color32::from_rgb(28, 32, 48),
+    sql_sysvar: Color32::from_rgb(132, 88, 232),
+};
+
+const DARK_PALETTE: Palette = Palette {
+    bg_backdrop: Color32::from_rgb(14, 16, 23),
+    bg_card: Color32::from_rgb(23, 26, 35),
+    bg_surface: Color32::from_rgb(29, 33, 44),
+    bg_hover: Color32::from_rgb(37, 42, 56),
+    border: Color32::from_rgb(44, 49, 64),
+    divider: Color32::from_rgb(36, 40, 53),
+    dot_grid: Color32::from_rgb(46, 51, 67),
+    text_primary: Color32::from_rgb(230, 233, 242),
+    text_muted: Color32::from_rgb(144, 151, 172),
+    accent: Color32::from_rgb(124, 128, 255),
+    accent_soft: Color32::from_rgb(40, 43, 82),
+    on_accent: Color32::from_rgb(255, 255, 255),
+    highlight: Color32::from_rgb(244, 132, 150),
+    success: Color32::from_rgb(82, 206, 156),
+    warning: Color32::from_rgb(245, 188, 78),
+    danger: Color32::from_rgb(244, 102, 114),
+    icon_schema: Color32::from_rgb(244, 120, 140),
+    icon_table: Color32::from_rgb(110, 156, 255),
+    icon_view: Color32::from_rgb(178, 140, 255),
+    row_alt: Color32::from_rgb(26, 29, 39),
+    cell_modified: Color32::from_rgb(66, 54, 26),
+    cell_inserted: Color32::from_rgb(24, 58, 44),
+    cell_deleted: Color32::from_rgb(70, 30, 38),
+    sql_keyword: Color32::from_rgb(140, 150, 255),
+    sql_string: Color32::from_rgb(122, 218, 168),
+    sql_number: Color32::from_rgb(246, 194, 104),
+    sql_comment: Color32::from_rgb(118, 126, 150),
+    sql_ident: Color32::from_rgb(222, 226, 240),
+    sql_sysvar: Color32::from_rgb(198, 156, 255),
+};
+
+impl AppTheme {
     pub fn palette(self) -> Palette {
         match self {
-            Self::DarkGlass => Palette {
-                bg_canvas: Color32::from_rgb(10, 17, 32),
-                bg_panel: Color32::from_rgb(15, 24, 44),
-                bg_surface: Color32::from_rgb(20, 32, 56),
-                bg_elevated: Color32::from_rgb(27, 42, 72),
-                glass_border: Color32::from_rgba_unmultiplied(186, 216, 255, 34),
-                text_primary: Color32::from_rgb(236, 244, 255),
-                text_muted: Color32::from_rgb(142, 164, 198),
-                accent: Color32::from_rgb(98, 182, 255),
-                accent_soft: Color32::from_rgba_unmultiplied(98, 182, 255, 36),
-                success: Color32::from_rgb(82, 206, 156),
-                warning: Color32::from_rgb(245, 188, 78),
-                danger: Color32::from_rgb(244, 102, 114),
-                row_alt: Color32::from_rgba_unmultiplied(255, 255, 255, 6),
-                cell_modified: Color32::from_rgba_unmultiplied(245, 188, 78, 42),
-                cell_inserted: Color32::from_rgba_unmultiplied(82, 206, 156, 38),
-                cell_deleted: Color32::from_rgba_unmultiplied(244, 102, 114, 42),
-                sql_keyword: Color32::from_rgb(112, 192, 255),
-                sql_string: Color32::from_rgb(122, 218, 168),
-                sql_number: Color32::from_rgb(246, 194, 104),
-                sql_comment: Color32::from_rgb(118, 138, 168),
-                sql_ident: Color32::from_rgb(218, 232, 255),
-                sql_sysvar: Color32::from_rgb(198, 156, 255),
-            },
-            Self::LightGlass => Palette {
-                bg_canvas: Color32::from_rgb(236, 242, 250),
-                bg_panel: Color32::from_rgb(245, 249, 255),
-                bg_surface: Color32::from_rgb(252, 254, 255),
-                bg_elevated: Color32::from_rgb(228, 238, 252),
-                glass_border: Color32::from_rgba_unmultiplied(28, 64, 128, 34),
-                text_primary: Color32::from_rgb(18, 30, 52),
-                text_muted: Color32::from_rgb(92, 112, 144),
-                accent: Color32::from_rgb(24, 114, 224),
-                accent_soft: Color32::from_rgba_unmultiplied(24, 114, 224, 28),
-                success: Color32::from_rgb(26, 146, 98),
-                warning: Color32::from_rgb(186, 122, 16),
-                danger: Color32::from_rgb(206, 52, 68),
-                row_alt: Color32::from_rgba_unmultiplied(20, 48, 96, 8),
-                cell_modified: Color32::from_rgba_unmultiplied(240, 178, 52, 56),
-                cell_inserted: Color32::from_rgba_unmultiplied(64, 196, 138, 48),
-                cell_deleted: Color32::from_rgba_unmultiplied(232, 84, 98, 48),
-                sql_keyword: Color32::from_rgb(18, 92, 206),
-                sql_string: Color32::from_rgb(22, 132, 78),
-                sql_number: Color32::from_rgb(176, 102, 12),
-                sql_comment: Color32::from_rgb(122, 138, 162),
-                sql_ident: Color32::from_rgb(22, 34, 56),
-                sql_sysvar: Color32::from_rgb(126, 58, 198),
-            },
+            Self::Light => LIGHT_PALETTE,
+            Self::Dark => DARK_PALETTE,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
         }
     }
 
     pub fn apply(self, ctx: &egui::Context) {
-        let p = self.palette();
-        let mut visuals = match self {
-            Self::DarkGlass => Visuals::dark(),
-            Self::LightGlass => Visuals::light(),
+        let egui_theme = match self {
+            Self::Light => egui::Theme::Light,
+            Self::Dark => egui::Theme::Dark,
         };
-
-        visuals.panel_fill = p.bg_panel;
-        visuals.window_fill = p.bg_surface;
-        visuals.extreme_bg_color = p.bg_canvas;
-        visuals.faint_bg_color = p.row_alt;
-        visuals.code_bg_color = p.bg_canvas;
-        visuals.window_stroke = Stroke::new(1.0, p.glass_border);
-        visuals.window_corner_radius = CornerRadius::same(12);
-        visuals.menu_corner_radius = CornerRadius::same(10);
-        visuals.selection.bg_fill = p.accent_soft;
-        visuals.selection.stroke = Stroke::new(1.0, p.accent);
-
-        visuals.widgets.noninteractive.bg_fill = p.bg_panel;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.glass_border);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text_primary);
-        visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
-
-        visuals.widgets.inactive.bg_fill = p.bg_surface;
-        visuals.widgets.inactive.weak_bg_fill = p.bg_surface;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, p.glass_border);
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text_primary);
-        visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
-
-        visuals.widgets.hovered.bg_fill = p.bg_elevated;
-        visuals.widgets.hovered.weak_bg_fill = p.bg_elevated;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text_primary);
-        visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
-
-        visuals.widgets.active.bg_fill = p.accent_soft;
-        visuals.widgets.active.bg_stroke = Stroke::new(1.2, p.accent);
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, p.text_primary);
-        visuals.widgets.active.corner_radius = CornerRadius::same(8);
-
-        ctx.set_visuals(visuals);
+        ctx.set_theme(egui_theme);
+        ctx.set_visuals(self.build_visuals());
+        ctx.style_mut(apply_spacing_and_typography);
     }
+
+    fn build_visuals(self) -> Visuals {
+        let palette = self.palette();
+        let mut visuals = match self {
+            Self::Light => Visuals::light(),
+            Self::Dark => Visuals::dark(),
+        };
+        let control_radius = CornerRadius::same(RADIUS_CONTROL);
+        let border_stroke = Stroke::new(1.0, palette.border);
+
+        visuals.panel_fill = palette.bg_backdrop;
+        visuals.window_fill = palette.bg_card;
+        visuals.extreme_bg_color = palette.bg_surface;
+        visuals.faint_bg_color = palette.row_alt;
+        visuals.code_bg_color = palette.bg_surface;
+        visuals.window_stroke = border_stroke;
+        visuals.window_corner_radius = CornerRadius::same(12);
+        visuals.menu_corner_radius = CornerRadius::same(8);
+        visuals.window_shadow = Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(40),
+        };
+        visuals.popup_shadow = Shadow {
+            offset: [0, 4],
+            blur: 12,
+            spread: 0,
+            color: Color32::from_black_alpha(28),
+        };
+        visuals.selection.bg_fill = palette.accent_soft;
+        visuals.selection.stroke = Stroke::new(1.0, palette.accent);
+        visuals.hyperlink_color = palette.accent;
+
+        let widgets = &mut visuals.widgets;
+        widgets.noninteractive.bg_fill = palette.bg_card;
+        widgets.noninteractive.weak_bg_fill = palette.bg_card;
+        widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.divider);
+        widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.text_primary);
+        widgets.noninteractive.corner_radius = control_radius;
+
+        widgets.inactive.bg_fill = palette.bg_surface;
+        widgets.inactive.weak_bg_fill = palette.bg_card;
+        widgets.inactive.bg_stroke = border_stroke;
+        widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text_primary);
+        widgets.inactive.corner_radius = control_radius;
+
+        widgets.hovered.bg_fill = palette.bg_hover;
+        widgets.hovered.weak_bg_fill = palette.bg_hover;
+        widgets.hovered.bg_stroke = border_stroke;
+        widgets.hovered.fg_stroke = Stroke::new(1.0, palette.text_primary);
+        widgets.hovered.corner_radius = control_radius;
+        widgets.hovered.expansion = 0.0;
+
+        widgets.active.bg_fill = palette.accent_soft;
+        widgets.active.weak_bg_fill = palette.accent_soft;
+        widgets.active.bg_stroke = Stroke::new(1.0, palette.accent);
+        widgets.active.fg_stroke = Stroke::new(1.0, palette.text_primary);
+        widgets.active.corner_radius = control_radius;
+        widgets.active.expansion = 0.0;
+
+        widgets.open = widgets.active;
+        visuals
+    }
+}
+
+fn apply_spacing_and_typography(style: &mut egui::Style) {
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.interact_size.y = 24.0;
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.spacing.scroll = egui::style::ScrollStyle {
+        foreground_color: true,
+        dormant_handle_opacity: 0.35,
+        active_handle_opacity: 0.55,
+        interact_handle_opacity: 0.75,
+        dormant_background_opacity: 0.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(15.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
+    ]
+    .into();
+}
+
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    ctx.set_fonts(fonts);
 }
 
 pub fn highlight_mysql_layout(
@@ -139,21 +237,21 @@ pub fn highlight_mysql_layout(
 ) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
-    let font_id = FontId::new(13.5, FontFamily::Monospace);
+    let font_id = FontId::new(13.0, FontFamily::Monospace);
 
-    for tok in tokenize(text) {
-        let color = match tok.kind {
+    for token in tokenize(text) {
+        let color = match token.kind {
             TokenKind::Keyword => palette.sql_keyword,
             TokenKind::StringLiteral => palette.sql_string,
             TokenKind::Number => palette.sql_number,
             TokenKind::Comment => palette.sql_comment,
             TokenKind::SystemVar => palette.sql_sysvar,
-            TokenKind::QuotedIdentifier => palette.accent,
+            TokenKind::QuotedIdentifier => palette.icon_table,
             TokenKind::Identifier | TokenKind::Operator | TokenKind::Punctuation => palette.sql_ident,
             TokenKind::Whitespace => palette.text_primary,
         };
         job.append(
-            tok.text,
+            token.text,
             0.0,
             TextFormat {
                 font_id: font_id.clone(),
@@ -163,5 +261,5 @@ pub fn highlight_mysql_layout(
         );
     }
 
-    ui.fonts(|f| f.layout_job(job))
+    ui.fonts(|fonts| fonts.layout_job(job))
 }

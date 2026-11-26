@@ -17,6 +17,7 @@ cottondata-mysql.workspace = true
 cottondata-sql.workspace = true
 cottondata-storage.workspace = true
 eframe.workspace = true
+egui-phosphor.workspace = true
 mimalloc.workspace = true
 rfd.workspace = true
 
