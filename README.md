@@ -183,28 +183,38 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 
 ## Features
 
-- **MySQL and SQL Server** in one app. MySQL 5.7 / 8.x / 9.x and SQL Server 2012+ with SQL login.
+- **MySQL and SQL Server** in one native app — MySQL 5.7 / 8.x / 9.x / MariaDB and SQL Server 2012+ with SQL login.
+- **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), and filters across servers with viewport culling for schemas containing hundreds of tables.
+- **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `mssql://`, `sqlserver://`), show/hide password, Unix sockets (MySQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
 - **Configurable server list**: 1 to 64 saved servers (default 10) from Settings. Saved servers cost almost no memory; only connected servers use RAM. `Cmd/Ctrl+1..0` switches the first ten.
-- **Connections**: TCP, Unix socket (MySQL), TLS modes (Disabled, Preferred, Required, Verify CA, Verify Identity), SSH tunnel, environment badges (LOCAL / DEV / STAGING / PROD), and a Read-Only guard per server.
-- **Schema navigator**: lazy loading of schemas or databases, tables, views, columns with type icons, and DDL, indexes, and foreign keys on demand.
-- **SQL console**: highlighting, run statement at cursor (`Cmd/Ctrl+Enter`), formatter, schema-aware completion, and warnings for `UPDATE`/`DELETE` without `WHERE`, `DROP`, and `TRUNCATE`.
-- **Result table**: aligned sticky header, two-axis scrolling, auto-sized columns, server-side `WHERE` filter, sorting, paging, and row counts.
-- **Copy and export**: select rows with click, Cmd-click, Shift-click, or `Cmd/Ctrl+A`; copy with `Cmd/Ctrl+C` (TSV) or right-click as CSV, JSON, JSON Lines, or SQL `INSERT`. Export whole pages to a file in the same formats.
-- **Inline editing**: stage inserts, clones, updates, and deletes, preview the SQL, and commit atomically.
-- **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and health metrics.
-- **Workspace sessions**: open tabs and connected servers are restored on launch.
-- **Memory guardrail**: all result grids share a 32 MiB budget with least-recently-used eviction.
+- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware completion, and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **Result Grid & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), server-side `WHERE` filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
+- **DataGrip-style Inline Cell Editing**: edit cells directly inside table tabs and single-table `SELECT` console results (`Double-click`, `Enter`, `F2`, or type-to-edit). Tracks original column names (`org_name`), supports `NULL`/`DEFAULT`, lazy-loads >4 KiB truncated cells, commits atomically (using `SAVEPOINT` inside open transactions), saves directly with `Cmd/Ctrl+S` on non-PROD while requiring **SQL Preview** on `PROD`, and protects staged edits with an **Unsaved Changes** dialog.
+- **Copy and Export**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`, or export full pages to disk.
+- **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
+- **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, on focus loss, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
+- **Memory Guardrail**: all result grids share a 32 MiB budget with least-recently-used eviction.
 
 ### Keyboard shortcuts
 
 | Action | macOS | Windows / Linux |
 |---|---|---|
-| Run statement at cursor | `Cmd+Enter` | `Ctrl+Enter` |
+| Run statement at cursor (or selected SQL) | `Cmd+Enter` | `Ctrl+Enter` |
+| Run all statements into separate result tabs | `Cmd+Shift+Enter` | `Ctrl+Shift+Enter` |
+| New SQL console tab | `Cmd+T` | `Ctrl+T` |
+| Reopen last closed tab | `Cmd+Shift+T` | `Ctrl+Shift+T` |
+| Close active tab | `Cmd+W` | `Ctrl+W` |
 | Switch to server 1..10 | `Cmd+1..0` | `Ctrl+1..0` |
+| Save staged grid edits (Preview on PROD) | `Cmd+S` | `Ctrl+S` |
+| Save inside New/Edit Connection modal | `Cmd+Enter` | `Ctrl+Enter` |
+| Start inline cell edit | `Double-click` / `Enter` / `F2` / type | `Double-click` / `Enter` / `F2` / type |
+| Open multiline cell Value Inspector | `Shift+Enter` | `Shift+Enter` |
+| Set selected cell to SQL `NULL` | `Alt+Cmd+N` | `Alt+Ctrl+N` |
+| Revert staged edit on selected cell | `Cmd+Z` | `Ctrl+Z` |
+| Clone selected row | `Cmd+D` | `Ctrl+D` |
 | Select all rows in the result table | `Cmd+A` | `Ctrl+A` |
 | Copy selected rows as TSV | `Cmd+C` | `Ctrl+C` |
-| Open the cell inspector | Double-click a cell | Double-click a cell |
-| Clear row selection | `Esc` | `Esc` |
+| Dismiss modal / cancel inline edit / clear selection | `Esc` | `Esc` |
 
 ### Known limitations
 
@@ -220,6 +230,8 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 |---|---|---|---|
 | Data directory | `~/Library/Application Support/CottonData` | `$XDG_CONFIG_HOME/cottondata` or `~/.config/cottondata` | `%APPDATA%\CottonData` |
 | Saved servers | `servers.json` in the data directory | same | same |
+| Workspace sessions & open consoles | `sessions.json` in the data directory | same | same |
+| Query history (last 300 queries) | `history.json` in the data directory | same | same |
 | Passwords | macOS Keychain (optional, chosen per server) | kept in memory for the session | kept in memory for the session |
 
 | Environment variable | Used by | Purpose |
@@ -247,7 +259,7 @@ Full usage: `cottondata-cli help`.
 
 ```bash
 cargo test --workspace
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release -p cottondata-desktop -p cottondata-cli
 ```
 
@@ -257,7 +269,7 @@ cargo build --release -p cottondata-desktop -p cottondata-cli
 | Linux | `./scripts/bundle-linux.sh` | `CottonData-linux-<arch>.tar.gz`, `.deb` when `dpkg-deb` exists |
 | Windows | `.\scripts\bundle-windows.ps1` | `CottonData-windows-x64.zip` |
 
-The package version comes from `version` in the root `Cargo.toml`.
+The package version comes from `version` in the root `Cargo.toml`. To bundle locally and publish a GitHub Release with `gh`, run `./scripts/publish-release.sh`. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ### Workspace crates
 
