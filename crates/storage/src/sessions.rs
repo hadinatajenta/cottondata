@@ -22,6 +22,8 @@ pub struct SessionTabState {
     pub order_by: Option<(String, SessionSortOrder)>,
     pub page_index: u64,
     pub page_size: u32,
+    #[serde(default)]
+    pub show_sql_editor: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,10 @@ fn default_autocommit() -> bool {
     true
 }
 
+fn default_editor_height() -> u32 {
+    220
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSession {
     pub id: String,
@@ -46,6 +52,8 @@ pub struct WorkspaceSession {
     pub tabs: Vec<SessionTabState>,
     pub connected_servers: Vec<ConnectedServerState>,
     pub updated_at_secs: u64,
+    #[serde(default = "default_editor_height")]
+    pub editor_height: u32,
 }
 
 impl WorkspaceSession {
@@ -59,6 +67,7 @@ impl WorkspaceSession {
             tabs: Vec::new(),
             connected_servers: Vec::new(),
             updated_at_secs: now_secs(),
+            editor_height: default_editor_height(),
         }
     }
 }

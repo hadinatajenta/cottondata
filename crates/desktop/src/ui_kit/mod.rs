@@ -5,10 +5,14 @@ use eframe::egui::{
 };
 
 mod canvas;
+mod form;
+mod modal;
 mod tabs;
 
 pub use canvas::{empty_state, loading_state, tree_toggle_icon};
 pub use egui_phosphor::regular as icon;
+pub use form::*;
+pub use modal::*;
 pub use tabs::{document_tab, underline_tab};
 
 pub fn card_frame(palette: Palette) -> egui::Frame {

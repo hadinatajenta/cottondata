@@ -348,63 +348,76 @@ impl CottonDataApp {
         };
         let diff_count = rows_data.iter().filter(|(_, _, _, _, d)| *d).count();
 
-        egui::Window::new(format!("Compare Rows: #{} vs #{}", row_a + 1, row_b + 1))
-            .open(&mut open)
-            .resizable(true)
-            .default_width(720.0)
-            .default_height(480.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut only_diffs, "Show only differing columns");
-                    caption(ui, p, format!("{diff_count} of {} columns differ", rows_data.len()));
-                });
-                ui.separator();
-                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                    egui::Grid::new("row_diff_grid")
-                        .striped(true)
-                        .num_columns(3)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.strong("Column");
-                            ui.strong(format!("Row #{}", row_a + 1));
-                            ui.strong(format!("Row #{}", row_b + 1));
-                            ui.end_row();
-                            for (name, ctype, va, vb, differs) in &rows_data {
-                                if only_diffs && !*differs {
-                                    continue;
-                                }
-                                ui.label(
-                                    RichText::new(format!("{name} ({ctype})"))
-                                        .font(FontId::new(12.0, FontFamily::Monospace))
-                                        .color(if *differs { p.accent } else { p.text_muted }),
-                                );
-                                let color_a = if *differs { p.danger } else { p.text_primary };
-                                let color_b = if *differs { p.success } else { p.text_primary };
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(va)
-                                            .font(FontId::new(12.0, FontFamily::Monospace))
-                                            .color(color_a),
-                                    )
-                                    .wrap(),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(vb)
-                                            .font(FontId::new(12.0, FontFamily::Monospace))
-                                            .color(color_b),
-                                    )
-                                    .wrap(),
-                                );
-                                ui.end_row();
+        let title = format!("Compare Rows: #{} vs #{}", row_a + 1, row_b + 1);
+        let subtitle = format!("{diff_count} of {} columns differ", rows_data.len());
+        let filter_only_diffs = only_diffs;
+        let outcome = crate::ui_kit::modal_shell(
+            ctx,
+            p,
+            crate::ui_kit::ModalConfig {
+                id: "row_diff_modal",
+                icon_glyph: icon::ROWS,
+                icon_color: p.accent,
+                title: &title,
+                subtitle: Some(&subtitle),
+                accent_bar: None,
+                width: 760.0,
+                max_height: Some(460.0),
+                dismiss_on_backdrop: true,
+            },
+            |ui| {
+                egui::Grid::new("row_diff_grid")
+                    .striped(true)
+                    .num_columns(3)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.strong("Column");
+                        ui.strong(format!("Row #{}", row_a + 1));
+                        ui.strong(format!("Row #{}", row_b + 1));
+                        ui.end_row();
+                        for (name, ctype, va, vb, differs) in &rows_data {
+                            if filter_only_diffs && !*differs {
+                                continue;
                             }
-                        });
+                            ui.label(
+                                RichText::new(format!("{name} ({ctype})"))
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(if *differs { p.accent } else { p.text_muted }),
+                            );
+                            let color_a = if *differs { p.danger } else { p.text_primary };
+                            let color_b = if *differs { p.success } else { p.text_primary };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(va)
+                                        .font(FontId::new(12.0, FontFamily::Monospace))
+                                        .color(color_a),
+                                )
+                                .wrap(),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(vb)
+                                        .font(FontId::new(12.0, FontFamily::Monospace))
+                                        .color(color_b),
+                                )
+                                .wrap(),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            },
+            |ui| {
+                ui.checkbox(&mut only_diffs, "Show only differing columns");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if secondary_button(ui, p, icon::X, "Close", true).clicked() {
+                        close_clicked = true;
+                    }
                 });
-                ui.add_space(6.0);
-                if secondary_button(ui, p, icon::X, "Close", true).clicked() {
-                    close_clicked = true;
-                }
-            });
+            },
+        );
+        if outcome.closed {
+            open = false;
+        }
 
         if open && !close_clicked {
             self.tabs[self.active_tab_idx].diff_rows = Some((row_a, row_b, only_diffs));

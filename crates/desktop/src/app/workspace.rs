@@ -96,9 +96,13 @@ impl CottonDataApp {
                     ui.painter().rect_filled(handle, CornerRadius::same(2), grip_color);
                     if splitter_resp.double_clicked() {
                         self.editor_height = 220.0;
+                        self.mark_session_dirty();
                     } else if splitter_resp.dragged() {
                         let max_h = (ctx.screen_rect().height() * 0.70).max(280.0);
                         self.editor_height = (self.editor_height + splitter_resp.drag_delta().y).clamp(100.0, max_h);
+                    }
+                    if splitter_resp.drag_stopped() {
+                        self.mark_session_dirty();
                     }
                     splitter_resp.on_hover_text("Drag to resize SQL editor height · Double-click to reset");
 

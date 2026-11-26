@@ -97,6 +97,7 @@ impl CottonDataApp {
         };
 
         let mut sql_edited = false;
+        let mut editor_lost_focus = false;
         let editor_h = self.editor_height;
         let font_id = FontId::new(13.0, FontFamily::Monospace);
         let row_height = ui.fonts(|f| f.row_height(&font_id)).max(16.0);
@@ -150,6 +151,9 @@ impl CottonDataApp {
                         if out.response.changed() {
                             sql_edited = true;
                         }
+                        if out.response.lost_focus() {
+                            editor_lost_focus = true;
+                        }
                         if let Some(range) = out.cursor_range {
                             let primary_idx = range.primary.ccursor.index;
                             let secondary_idx = range.secondary.ccursor.index;
@@ -195,6 +199,7 @@ impl CottonDataApp {
 
         if toggle_expand_editor {
             self.editor_height = if self.editor_height >= 340.0 { 220.0 } else { 420.0 };
+            self.mark_session_dirty();
         }
         if run_current {
             self.request_execute_active_tab(false);
@@ -240,6 +245,9 @@ impl CottonDataApp {
         }
         if sql_edited {
             self.mark_session_dirty();
+        }
+        if editor_lost_focus && self.session_dirty_since.is_some() {
+            self.persist_sessions_now();
         }
     }
 }

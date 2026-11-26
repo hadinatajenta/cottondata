@@ -1,5 +1,6 @@
 use super::query_tab::{result_set_label, BottomDeckTab, StoredResultSet};
 use super::row_selection::RowSelection;
+use super::server_form::ConnectionTestState;
 use super::CottonDataApp;
 use crate::worker::{SlotCmd, WorkerEvent};
 use cottondata_core::ConnectionStatus;
@@ -427,6 +428,20 @@ impl CottonDataApp {
                 WorkerEvent::HealthLoaded { slot, metrics } => {
                     self.health[slot.index()] = Some(metrics);
                     self.slot_activity[slot.index()].is_refreshing_monitor = false;
+                }
+                WorkerEvent::TestConnectionFinished {
+                    request_id,
+                    result,
+                    elapsed_ms,
+                } => {
+                    if let Some(modal) = self.modal.as_mut() {
+                        if modal.test_state == ConnectionTestState::Testing(request_id) {
+                            modal.test_state = match result {
+                                Ok(summary) => ConnectionTestState::Success { summary, elapsed_ms },
+                                Err(err) => ConnectionTestState::Failed(err),
+                            };
+                        }
+                    }
                 }
             }
         }

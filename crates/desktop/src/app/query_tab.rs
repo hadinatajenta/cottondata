@@ -218,7 +218,7 @@ impl QueryTab {
             is_counting_rows: false,
             is_submitting_mutations: false,
             is_loading_full_cell: false,
-            show_sql_editor: state.bound_table.is_none(),
+            show_sql_editor: state.show_sql_editor.unwrap_or_else(|| state.bound_table.is_none()),
         }
     }
 
@@ -241,6 +241,7 @@ impl QueryTab {
             order_by,
             page_index: self.filter_sort.page_index,
             page_size: self.filter_sort.page_size,
+            show_sql_editor: Some(self.show_sql_editor),
         }
     }
 

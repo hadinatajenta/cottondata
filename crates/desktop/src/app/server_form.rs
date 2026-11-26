@@ -2,6 +2,21 @@ use cottondata_core::{
     ConnectionEndpoint, DatabaseEngine, EnvironmentTag, ServerProfile, ServerSlotId, SshTunnelConfig, TlsMode,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerFormTab {
+    General,
+    Security,
+    Ssh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ConnectionTestState {
+    Idle,
+    Testing(u64),
+    Success { summary: String, elapsed_ms: u64 },
+    Failed(String),
+}
+
 pub(super) struct ServerModalState {
     pub(super) editing_slot: Option<ServerSlotId>,
     pub(super) engine: DatabaseEngine,
@@ -25,6 +40,11 @@ pub(super) struct ServerModalState {
     pub(super) read_only: bool,
     pub(super) page_size: u32,
     pub(super) error_msg: Option<String>,
+    pub(super) active_tab: ServerFormTab,
+    pub(super) show_password: bool,
+    pub(super) show_uri_bar: bool,
+    pub(super) uri_input: String,
+    pub(super) test_state: ConnectionTestState,
 }
 
 impl ServerModalState {
@@ -52,18 +72,31 @@ impl ServerModalState {
             read_only: false,
             page_size: 500,
             error_msg: None,
+            active_tab: ServerFormTab::General,
+            show_password: false,
+            show_uri_bar: false,
+            uri_input: String::new(),
+            test_state: ConnectionTestState::Idle,
         }
     }
 
     pub(super) fn from_existing(slot: ServerSlotId, p: &ServerProfile, pw: Option<String>) -> Self {
+        Self::from_profile(Some(slot), p, pw, p.name.clone())
+    }
+
+    pub(super) fn from_duplicate(p: &ServerProfile, pw: Option<String>) -> Self {
+        Self::from_profile(None, p, pw, format!("{} (Copy)", p.name))
+    }
+
+    fn from_profile(editing_slot: Option<ServerSlotId>, p: &ServerProfile, pw: Option<String>, name: String) -> Self {
         let (use_unix_socket, host, port, socket_path) = match &p.endpoint {
             ConnectionEndpoint::Tcp { host, port } => (false, host.clone(), port.to_string(), "/tmp/mysql.sock".into()),
             ConnectionEndpoint::UnixSocket { path } => (true, "127.0.0.1".into(), "3306".into(), path.clone()),
         };
         Self {
-            editing_slot: Some(slot),
+            editing_slot,
             engine: p.engine,
-            name: p.name.clone(),
+            name,
             use_unix_socket,
             host,
             port,
@@ -83,6 +116,11 @@ impl ServerModalState {
             read_only: p.read_only,
             page_size: p.page_size,
             error_msg: None,
+            active_tab: ServerFormTab::General,
+            show_password: false,
+            show_uri_bar: false,
+            uri_input: String::new(),
+            test_state: ConnectionTestState::Idle,
         }
     }
 
@@ -98,6 +136,165 @@ impl ServerModalState {
             self.username = default_username(engine).into();
         }
         self.engine = engine;
+    }
+
+    pub(super) fn apply_connection_uri(&mut self, raw: &str) -> Result<(), String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("Connection URI cannot be empty".to_string());
+        }
+
+        let (scheme, rest) = trimmed
+            .split_once("://")
+            .ok_or_else(|| "Connection URI must include a scheme (e.g. mysql:// or mssql://)".to_string())?;
+
+        let engine = match scheme.to_ascii_lowercase().as_str() {
+            "mysql" | "mariadb" => DatabaseEngine::MySql,
+            "mssql" | "sqlserver" => DatabaseEngine::SqlServer,
+            _ => {
+                return Err(format!(
+                    "Unsupported URI scheme '{scheme}'. Expected mysql://, mariadb://, mssql://, or sqlserver://"
+                ));
+            }
+        };
+
+        let (before_query, raw_query) = match rest.split_once('?') {
+            Some((before, q)) => (before, Some(q.split('#').next().unwrap_or(q))),
+            None => (rest, None),
+        };
+
+        let (authority, raw_path) = match before_query.split_once('/') {
+            Some((auth, path)) => (auth, Some(path.split('#').next().unwrap_or(path))),
+            None => (before_query, None),
+        };
+
+        let (userinfo, host_port) = match authority.rsplit_once('@') {
+            Some((info, hp)) => (Some(info), hp),
+            None => (None, authority),
+        };
+
+        let (parsed_user, parsed_pass) = match userinfo {
+            Some(info) if !info.is_empty() => match info.split_once(':') {
+                Some((u, p)) => (Some(percent_decode(u)), Some(percent_decode(p))),
+                None => (Some(percent_decode(info)), None),
+            },
+            _ => (None, None),
+        };
+
+        let (host, port_str) = if let Some(after_open) = host_port.strip_prefix('[') {
+            let (ipv6, after_close) = after_open
+                .split_once(']')
+                .ok_or_else(|| "Invalid IPv6 host: missing closing ']'".to_string())?;
+            if ipv6.trim().is_empty() {
+                return Err("Connection URI is missing a host".to_string());
+            }
+            let port_part = if after_close.is_empty() {
+                None
+            } else if let Some(p) = after_close.strip_prefix(':') {
+                Some(p)
+            } else {
+                return Err(format!("Invalid host/port syntax: '{host_port}'"));
+            };
+            (ipv6.trim().to_string(), port_part)
+        } else if let Some((h, p)) = host_port.rsplit_once(':') {
+            if h.contains(':') {
+                return Err("IPv6 addresses must be enclosed in brackets, e.g. [::1]:3306".to_string());
+            }
+            (percent_decode(h).trim().to_string(), Some(p))
+        } else {
+            (percent_decode(host_port).trim().to_string(), None)
+        };
+
+        if host.is_empty() {
+            return Err("Connection URI is missing a host".to_string());
+        }
+
+        let port = match port_str {
+            Some(p) if !p.is_empty() => {
+                let parsed = p
+                    .parse::<u16>()
+                    .map_err(|_| format!("Invalid port '{p}': must be a number between 1 and 65535"))?;
+                if parsed == 0 {
+                    return Err("Invalid port '0': must be a number between 1 and 65535".to_string());
+                }
+                parsed
+            }
+            Some(_) => return Err("Connection URI has an empty port after ':'".to_string()),
+            None => engine.default_port(),
+        };
+
+        let mut parsed_schema = raw_path
+            .map(|p| p.trim_end_matches('/'))
+            .filter(|p| !p.is_empty())
+            .map(percent_decode)
+            .filter(|s| !s.trim().is_empty());
+
+        let mut parsed_tls: Option<TlsMode> = None;
+
+        if let Some(query) = raw_query {
+            for pair in query.split('&') {
+                if pair.is_empty() {
+                    continue;
+                }
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let key = percent_decode(k).trim().to_ascii_lowercase();
+                let val = percent_decode(v).trim().to_string();
+                match key.as_str() {
+                    "ssl-mode" | "sslmode" | "encrypt" => {
+                        if let Some(mode) = parse_tls_mode(&val) {
+                            parsed_tls = Some(mode);
+                        }
+                    }
+                    "database" => {
+                        if parsed_schema.is_none() && !val.is_empty() {
+                            parsed_schema = Some(val);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let previous_engine = self.engine;
+        self.engine = engine;
+        self.use_unix_socket = false;
+        self.host = host;
+        self.port = port.to_string();
+
+        if let Some(user) = parsed_user {
+            if !user.is_empty() {
+                self.username = user;
+            }
+        } else if self.username.trim().is_empty() || self.username.trim() == default_username(previous_engine) {
+            self.username = default_username(engine).into();
+        }
+
+        if let Some(pass) = parsed_pass {
+            self.password = pass;
+        }
+
+        if let Some(schema) = parsed_schema {
+            self.default_schema = schema;
+        }
+
+        if let Some(tls) = parsed_tls {
+            self.tls = tls;
+        }
+
+        if self.name.trim().is_empty() {
+            let schema_or_host = if self.default_schema.trim().is_empty() {
+                self.host.as_str()
+            } else {
+                self.default_schema.as_str()
+            };
+            self.name = format!("{} ({})", schema_or_host, self.engine.label());
+        }
+
+        self.test_state = ConnectionTestState::Idle;
+        self.error_msg = None;
+        Ok(())
     }
 
     pub(super) fn build_profile(&self, existing_id: Option<String>) -> Result<ServerProfile, String> {
@@ -192,5 +389,196 @@ fn default_username(engine: DatabaseEngine) -> &'static str {
     match engine {
         DatabaseEngine::MySql => "root",
         DatabaseEngine::SqlServer => "sa",
+    }
+}
+
+fn parse_tls_mode(value: &str) -> Option<TlsMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "disabled" | "false" => Some(TlsMode::Disabled),
+        "preferred" => Some(TlsMode::Preferred),
+        "required" | "true" => Some(TlsMode::Required),
+        "verify_ca" | "verify-ca" => Some(TlsMode::VerifyCa),
+        "verify_identity" | "verify-identity" => Some(TlsMode::VerifyIdentity),
+        _ => None,
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_mysql_uri_with_percent_encoded_password_port_schema_and_tls() {
+        let mut form = ServerModalState::new_empty();
+        form.use_unix_socket = true;
+        form.error_msg = Some("previous error".into());
+        form.test_state = ConnectionTestState::Failed("old failure".into());
+
+        form.apply_connection_uri("mysql://app_user:p%40ss%3A123@db.prod.internal:3307/orders%20db?ssl-mode=required")
+            .expect("valid mysql URI");
+
+        assert_eq!(form.engine, DatabaseEngine::MySql);
+        assert!(!form.use_unix_socket);
+        assert_eq!(form.username, "app_user");
+        assert_eq!(form.password, "p@ss:123");
+        assert_eq!(form.host, "db.prod.internal");
+        assert_eq!(form.port, "3307");
+        assert_eq!(form.default_schema, "orders db");
+        assert_eq!(form.tls, TlsMode::Required);
+        assert_eq!(form.name, "orders db (MySQL)");
+        assert_eq!(form.test_state, ConnectionTestState::Idle);
+        assert_eq!(form.error_msg, None);
+    }
+
+    #[test]
+    fn parses_sqlserver_uri_with_default_port_and_database() {
+        let mut form = ServerModalState::new_empty();
+        form.apply_connection_uri("sqlserver://sa:Str0ng%2FPass%251@mssql.local/reporting?encrypt=true")
+            .expect("valid sqlserver URI");
+
+        assert_eq!(form.engine, DatabaseEngine::SqlServer);
+        assert_eq!(form.username, "sa");
+        assert_eq!(form.password, "Str0ng/Pass%1");
+        assert_eq!(form.host, "mssql.local");
+        assert_eq!(form.port, "1433");
+        assert_eq!(form.default_schema, "reporting");
+        assert_eq!(form.tls, TlsMode::Required);
+        assert_eq!(form.name, "reporting (SQL Server)");
+
+        let mut query_db_form = ServerModalState::new_empty();
+        query_db_form
+            .apply_connection_uri("mssql://admin:pw@10.0.0.9?database=analytics&encrypt=false")
+            .expect("valid mssql URI with database query param");
+        assert_eq!(query_db_form.engine, DatabaseEngine::SqlServer);
+        assert_eq!(query_db_form.port, "1433");
+        assert_eq!(query_db_form.default_schema, "analytics");
+        assert_eq!(query_db_form.tls, TlsMode::Disabled);
+    }
+
+    #[test]
+    fn parses_mariadb_uri_without_password_and_default_port() {
+        let mut form = ServerModalState::new_empty();
+        form.password = "existing-secret".into();
+        form.name = "Existing Name".into();
+
+        form.apply_connection_uri("mariadb://readonly@db.staging.local/catalog?sslmode=verify-identity")
+            .expect("valid mariadb URI");
+
+        assert_eq!(form.engine, DatabaseEngine::MySql);
+        assert_eq!(form.username, "readonly");
+        assert_eq!(form.password, "existing-secret");
+        assert_eq!(form.host, "db.staging.local");
+        assert_eq!(form.port, "3306");
+        assert_eq!(form.default_schema, "catalog");
+        assert_eq!(form.tls, TlsMode::VerifyIdentity);
+        assert_eq!(form.name, "Existing Name");
+    }
+
+    #[test]
+    fn parses_ipv6_bracketed_host_with_and_without_port() {
+        let mut form = ServerModalState::new_empty();
+        form.apply_connection_uri("mysql://root:pw@[::1]:3308/localdb?ssl-mode=verify_ca")
+            .expect("valid ipv6 URI with port");
+        assert_eq!(form.host, "::1");
+        assert_eq!(form.port, "3308");
+        assert_eq!(form.default_schema, "localdb");
+        assert_eq!(form.tls, TlsMode::VerifyCa);
+
+        let mut default_port_form = ServerModalState::new_empty();
+        default_port_form
+            .apply_connection_uri("mysql://root@[::1]")
+            .expect("valid ipv6 URI with default port");
+        assert_eq!(default_port_form.host, "::1");
+        assert_eq!(default_port_form.port, "3306");
+        assert_eq!(default_port_form.name, "::1 (MySQL)");
+    }
+
+    #[test]
+    fn rejects_invalid_scheme_missing_host_or_bad_port() {
+        let mut form = ServerModalState::new_empty();
+        assert!(form.apply_connection_uri("").is_err());
+        assert!(form.apply_connection_uri("localhost:3306").is_err());
+        assert!(form.apply_connection_uri("postgres://user:pass@localhost:5432/db").is_err());
+        assert!(form.apply_connection_uri("mysql:///orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@/orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@[]:3306/orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@[::1/orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@localhost:abc/orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@localhost:0/orders").is_err());
+        assert!(form.apply_connection_uri("mysql://user:pass@localhost:/orders").is_err());
+    }
+
+    #[test]
+    fn from_duplicate_clears_editing_slot_and_appends_copy_suffix() {
+        let mut profile = ServerProfile::new_local("Production DB", "10.20.30.40", 3307, "deploy");
+        profile.engine = DatabaseEngine::SqlServer;
+        profile.default_schema = Some("core".into());
+        profile.tls = TlsMode::VerifyIdentity;
+        profile.ca_cert_path = Some("/etc/ssl/ca.pem".into());
+        profile.ssh = SshTunnelConfig {
+            enabled: true,
+            host: "bastion.example.com".into(),
+            port: 2222,
+            username: "ops".into(),
+            identity_file: Some("/Users/dev/.ssh/id_ed25519".into()),
+            local_bind_port: None,
+        };
+        profile.environment = EnvironmentTag::Production;
+        profile.read_only = true;
+        profile.page_size = 1000;
+
+        let dup = ServerModalState::from_duplicate(&profile, Some("s3cr3t".into()));
+
+        assert_eq!(dup.editing_slot, None);
+        assert_eq!(dup.name, "Production DB (Copy)");
+        assert_eq!(dup.engine, DatabaseEngine::SqlServer);
+        assert!(!dup.use_unix_socket);
+        assert_eq!(dup.host, "10.20.30.40");
+        assert_eq!(dup.port, "3307");
+        assert_eq!(dup.username, "deploy");
+        assert_eq!(dup.password, "s3cr3t");
+        assert_eq!(dup.default_schema, "core");
+        assert_eq!(dup.tls, TlsMode::VerifyIdentity);
+        assert_eq!(dup.ca_cert_path, "/etc/ssl/ca.pem");
+        assert!(dup.ssh_enabled);
+        assert_eq!(dup.ssh_host, "bastion.example.com");
+        assert_eq!(dup.ssh_port, "2222");
+        assert_eq!(dup.ssh_user, "ops");
+        assert_eq!(dup.ssh_key, "/Users/dev/.ssh/id_ed25519");
+        assert_eq!(dup.environment, EnvironmentTag::Production);
+        assert!(dup.read_only);
+        assert_eq!(dup.page_size, 1000);
+        assert_eq!(dup.active_tab, ServerFormTab::General);
+        assert!(!dup.show_password);
+        assert!(!dup.show_uri_bar);
+        assert!(dup.uri_input.is_empty());
+        assert_eq!(dup.test_state, ConnectionTestState::Idle);
     }
 }

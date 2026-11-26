@@ -127,5 +127,6 @@ impl CottonDataApp {
                 },
             );
         }
+        self.persist_sessions_now();
     }
 }

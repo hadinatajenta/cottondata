@@ -141,6 +141,11 @@ pub enum WorkerEvent {
         slot: ServerSlotId,
         metrics: ServerHealthMetrics,
     },
+    TestConnectionFinished {
+        request_id: u64,
+        result: Result<String, String>,
+        elapsed_ms: u64,
+    },
 }
 
 struct SlotWorker {
@@ -216,6 +221,35 @@ impl WorkerHub {
                 if let Some(c) = ctx {
                     c.request_repaint();
                 }
+            });
+    }
+
+    pub fn test_connection_async(&self, request_id: u64, profile: ServerProfile, password: Option<String>) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-test-conn".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let result = match open_session(&profile, password.as_deref()) {
+                    Ok(mut session) => {
+                        let summary = format!("{} {}", profile.engine.label(), session.runtime().version);
+                        let _ = session.ping();
+                        Ok(summary)
+                    }
+                    Err(err) => Err(err.to_string()),
+                };
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                emit(
+                    &ev_tx,
+                    &ctx,
+                    WorkerEvent::TestConnectionFinished {
+                        request_id,
+                        result,
+                        elapsed_ms,
+                    },
+                );
             });
     }
 

@@ -18,6 +18,7 @@ pub(super) enum ServerAction {
     Disconnect(ServerSlotId),
     NewConsole(ServerSlotId),
     Edit(ServerSlotId),
+    Duplicate(ServerSlotId),
     Remove(ServerSlotId),
 }
 
@@ -288,6 +289,14 @@ impl CottonDataApp {
                     self.modal = Some(ServerModalState::from_existing(slot_id, &slot.profile, password));
                 }
             }
+            ServerAction::Duplicate(slot_id) => {
+                if !self.registry.is_full() {
+                    if let Some(slot) = self.registry.get(slot_id) {
+                        let password = self.storage.get_password(&slot.profile.id);
+                        self.modal = Some(ServerModalState::from_duplicate(&slot.profile, password));
+                    }
+                }
+            }
             ServerAction::Remove(slot_id) => self.remove_server(slot_id),
         }
     }
@@ -419,6 +428,10 @@ fn render_server_tree_header(
                             ui.separator();
                             if ui.button(format!("{}  Edit server…", icon::PENCIL_SIMPLE)).clicked() {
                                 action = Some(ServerAction::Edit(slot_id));
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("{}  Duplicate server…", icon::COPY)).clicked() {
+                                action = Some(ServerAction::Duplicate(slot_id));
                                 ui.close_menu();
                             }
                             if ui.button(format!("{}  Remove server", icon::TRASH)).clicked() {

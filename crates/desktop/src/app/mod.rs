@@ -26,7 +26,7 @@ use activity::SlotActivity;
 use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_driver::{ProcessEntry, ServerHealthMetrics};
-use cottondata_storage::{AppStorage, ConnectedServerState, QueryHistoryItem, SessionsStore};
+use cottondata_storage::{AppStorage, ConnectedServerState, QueryHistoryItem, SessionTabState, SessionsStore};
 use eframe::egui;
 use query_tab::{BottomDeckTab, QueryTab};
 use server_form::ServerModalState;
@@ -113,6 +113,8 @@ pub struct CottonDataApp {
     slot_activity: [SlotActivity; SERVER_SLOT_CAPACITY],
     session_dirty_since: Option<Instant>,
     last_ping_at: Instant,
+    closed_tabs: Vec<SessionTabState>,
+    test_conn_seq: u64,
 }
 
 impl CottonDataApp {
@@ -169,6 +171,8 @@ impl CottonDataApp {
             slot_activity: std::array::from_fn(|_| SlotActivity::default()),
             session_dirty_since: None,
             last_ping_at: Instant::now(),
+            closed_tabs: Vec::new(),
+            test_conn_seq: 0,
         };
         app.restore_active_session(true);
         app
@@ -234,11 +238,38 @@ impl CottonDataApp {
             return;
         }
         let removed = self.tabs.remove(idx);
+        let saved_state = removed.to_session_state(removed.slot.and_then(|s| self.server_id_for_slot(s)));
+        self.closed_tabs.push(saved_state);
+        if self.closed_tabs.len() > 10 {
+            self.closed_tabs.remove(0);
+        }
         self.memory_budget.remove(&format!("tab-{}", removed.id));
         if idx < self.active_tab_idx || self.active_tab_idx >= self.tabs.len() {
             self.active_tab_idx = self.active_tab_idx.saturating_sub(1);
         }
         self.persist_sessions_now();
+    }
+
+    pub(super) fn reopen_closed_tab(&mut self) {
+        let Some(mut saved) = self.closed_tabs.pop() else {
+            return;
+        };
+        let slot = saved
+            .server_id
+            .as_deref()
+            .and_then(|id| self.slot_for_server_id(id))
+            .or(self.active_slot);
+        saved.id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let title = saved.title.clone();
+        let tab = QueryTab::from_session_state(&saved, slot);
+        if let Some(s) = slot {
+            self.active_slot = Some(s);
+        }
+        self.tabs.push(tab);
+        self.active_tab_idx = self.tabs.len() - 1;
+        self.persist_sessions_now();
+        self.notify_info(format!("Reopened `{title}`"));
     }
 
     pub(super) fn connect_slot(&mut self, slot: ServerSlotId) {
@@ -344,6 +375,7 @@ impl CottonDataApp {
         let mut run_query = false;
         let mut run_all_queries = false;
         let mut new_console = false;
+        let mut reopen_tab = false;
         let mut close_active = false;
         let mut chosen_slot = None;
         ctx.input(|i| {
@@ -355,7 +387,11 @@ impl CottonDataApp {
                 }
             }
             if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::T) {
-                new_console = true;
+                if i.modifiers.shift {
+                    reopen_tab = true;
+                } else {
+                    new_console = true;
+                }
             }
             if !modal_open && i.modifiers.command && i.key_pressed(egui::Key::W) {
                 close_active = true;
@@ -377,7 +413,9 @@ impl CottonDataApp {
         } else if run_query {
             self.request_execute_active_tab(false);
         }
-        if new_console {
+        if reopen_tab {
+            self.reopen_closed_tab();
+        } else if new_console {
             self.open_console_tab();
         }
         if close_active {
@@ -392,6 +430,9 @@ impl CottonDataApp {
 
 impl eframe::App for CottonDataApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.persist_sessions_now();
+        }
         self.hub.set_egui_ctx(ctx.clone());
         self.process_worker_events();
         self.handle_shortcuts(ctx);

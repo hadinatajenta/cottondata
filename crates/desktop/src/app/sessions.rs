@@ -2,18 +2,18 @@ use super::query_tab::QueryTab;
 use super::CottonDataApp;
 use crate::theme::{AppTheme, Palette, RADIUS_CONTROL};
 use crate::ui_kit::{
-    banner, caption, icon, icon_button, icon_text, inset_frame, pill, primary_button, secondary_button,
-    tinted_ghost_button,
+    banner, caption, field_label, icon, icon_button, icon_text, inset_frame, modal_shell, pill, primary_button,
+    secondary_button, styled_text_input, tinted_ghost_button, ModalConfig,
 };
 use crate::worker::SlotCmd;
 use cottondata_core::{ConnectionStatus, ServerSlotId};
 use cottondata_storage::{now_secs, ConnectedServerState};
-use eframe::egui::{self, CornerRadius, Margin, RichText};
+use eframe::egui::{self, CornerRadius, Margin};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub(super) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(45);
-pub(super) const SESSION_AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(1200);
+pub(super) const SESSION_AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
 pub(super) struct SessionModalState {
     pub(super) new_session_name: String,
@@ -82,6 +82,7 @@ impl CottonDataApp {
         self.active_tab_idx = session.active_tab_idx.min(self.tabs.len().saturating_sub(1));
         let max_id = self.tabs.iter().map(|t| t.id).max().unwrap_or(0);
         self.next_tab_id = session.next_tab_id.max(max_id + 1);
+        self.editor_height = (session.editor_height as f32).clamp(100.0, 640.0);
         self.ddl_view = None;
 
         if !auto_connect {
@@ -217,19 +218,23 @@ impl CottonDataApp {
 
         let active_tab_idx = self.active_tab_idx;
         let next_tab_id = self.next_tab_id;
+        let editor_height = self.editor_height.round().clamp(100.0, 640.0) as u32;
         let session = self.sessions_store.active_session_mut();
         session.active_server_id = active_server_id;
         session.active_tab_idx = active_tab_idx;
         session.next_tab_id = next_tab_id;
         session.tabs = tabs;
         session.connected_servers = connected_servers;
+        session.editor_height = editor_height;
         session.updated_at_secs = now_secs();
     }
 
     pub(super) fn persist_sessions_now(&mut self) {
         self.sync_active_session_to_store();
         self.session_dirty_since = None;
-        let _ = self.storage.save_sessions(&self.sessions_store);
+        if let Err(err) = self.storage.save_sessions(&self.sessions_store) {
+            self.notify_error(format!("Could not save workspace session: {err}"));
+        }
     }
 
     pub(super) fn mark_session_dirty(&mut self) {
@@ -318,6 +323,7 @@ impl CottonDataApp {
         };
         let mut keep_open = true;
         let mut action: Option<SessionModalAction> = None;
+        let mut footer_action: Option<SessionModalAction> = None;
 
         let active_id = self.sessions_store.active_session_id.clone();
         let active_tab_count = self.tabs.len();
@@ -346,27 +352,30 @@ impl CottonDataApp {
             })
             .collect();
 
-        egui::Window::new("Workspace Sessions")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(500.0)
-            .show(ctx, |ui| {
-                caption(
-                    ui,
-                    p,
-                    "Console tabs, open tables, and MySQL connections stay saved and auto-reconnect on launch.",
-                );
-                ui.add_space(6.0);
-
+        let outcome = modal_shell(
+            ctx,
+            p,
+            ModalConfig {
+                id: "workspace_sessions_modal",
+                icon_glyph: icon::STACK,
+                icon_color: p.accent,
+                title: "Workspace Sessions",
+                subtitle: Some("Console tabs, SQL drafts, and connections auto-save and restore on launch"),
+                accent_bar: None,
+                width: 540.0,
+                max_height: None,
+                dismiss_on_backdrop: true,
+            },
+            |ui| {
                 if let Some(err) = &state.error_msg {
                     banner(ui, p, p.danger, icon::WARNING, err, false);
-                    ui.add_space(6.0);
+                    ui.add_space(10.0);
                 }
 
                 inset_frame(p).show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("sessions_modal_list")
-                        .max_height(230.0)
+                        .max_height(240.0)
                         .show(ui, |ui| {
                             for (sid, sname, tabs, conns) in &snapshots {
                                 let is_active = *sid == active_id;
@@ -378,14 +387,18 @@ impl CottonDataApp {
                                         egui::Color32::TRANSPARENT
                                     })
                                     .corner_radius(CornerRadius::same(RADIUS_CONTROL))
-                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .inner_margin(Margin::symmetric(10, 7))
                                     .show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             if is_renaming {
-                                                let resp = ui.add(
-                                                    egui::TextEdit::singleline(&mut state.rename_buf)
-                                                        .desired_width(210.0),
+                                                let resp = styled_text_input(
+                                                    ui,
+                                                    p,
+                                                    ("session_rename", sid),
+                                                    &mut state.rename_buf,
+                                                    "Session name",
+                                                    210.0,
                                                 );
                                                 let enter =
                                                     resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -443,37 +456,45 @@ impl CottonDataApp {
                         });
                 });
 
-                ui.add_space(8.0);
-                ui.label(RichText::new("New session").size(12.0).color(p.text_muted));
+                ui.add_space(12.0);
+                field_label(ui, p, "Create or Duplicate Session");
+                let full_w = ui.available_width();
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.new_session_name)
-                            .hint_text("e.g. Prod Debug, Migration, Analytics")
-                            .desired_width(240.0),
+                    let input_w = (full_w - 230.0).max(160.0);
+                    styled_text_input(
+                        ui,
+                        p,
+                        "new_session_name_input",
+                        &mut state.new_session_name,
+                        "e.g. Prod Debug, Migration, Analytics",
+                        input_w,
                     );
                     if primary_button(ui, p, icon::PLUS, "Create", true).clicked() {
                         action = Some(SessionModalAction::Create(state.new_session_name.clone()));
                     }
-                    if secondary_button(ui, p, icon::COPY, "Duplicate current", true).clicked() {
+                    if secondary_button(ui, p, icon::COPY, "Duplicate", true).clicked() {
                         action = Some(SessionModalAction::Duplicate(state.new_session_name.clone()));
                     }
                 });
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if secondary_button(ui, p, icon::ARROW_CLOCKWISE, "Reconnect servers", true).clicked() {
-                        action = Some(SessionModalAction::ReconnectAll);
+            },
+            |ui| {
+                if secondary_button(ui, p, icon::ARROW_CLOCKWISE, "Reconnect servers", true).clicked() {
+                    footer_action = Some(SessionModalAction::ReconnectAll);
+                }
+                if secondary_button(ui, p, icon::FLOPPY_DISK, "Save now", true).clicked() {
+                    footer_action = Some(SessionModalAction::SaveNow);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if secondary_button(ui, p, icon::X, "Close", true).clicked() {
+                        keep_open = false;
                     }
-                    if secondary_button(ui, p, icon::FLOPPY_DISK, "Save now", true).clicked() {
-                        action = Some(SessionModalAction::SaveNow);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if secondary_button(ui, p, icon::X, "Close", true).clicked() {
-                            keep_open = false;
-                        }
-                    });
                 });
-            });
+            },
+        );
+        if outcome.closed {
+            keep_open = false;
+        }
+        let action = action.or(footer_action);
 
         if let Some(act) = action {
             match act {

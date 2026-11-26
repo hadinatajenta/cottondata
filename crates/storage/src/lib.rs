@@ -317,6 +317,7 @@ mod tests {
                 order_by: None,
                 page_index: 0,
                 page_size: 500,
+                show_sql_editor: Some(true),
             });
             active.tabs.push(SessionTabState {
                 id: 2,
@@ -329,7 +330,9 @@ mod tests {
                 order_by: Some(("id".into(), SessionSortOrder::Desc)),
                 page_index: 2,
                 page_size: 500,
+                show_sql_editor: Some(false),
             });
+            active.editor_height = 360;
             active.connected_servers.push(ConnectedServerState {
                 server_id: "srv-prod-1".into(),
                 active_schema: Some("shop".into()),
@@ -362,6 +365,15 @@ mod tests {
             Some("shop")
         );
         assert!(!reloaded.active_session().connected_servers[0].autocommit);
+
+        assert_eq!(reloaded.active_session().editor_height, 360);
+        assert_eq!(reloaded.active_session().tabs[0].show_sql_editor, Some(true));
+        assert_eq!(reloaded.active_session().tabs[1].show_sql_editor, Some(false));
+
+        let legacy_json = r#"{"version":1,"active_session_id":"default","sessions":[{"id":"default","name":"Default","active_server_id":null,"active_tab_idx":0,"next_tab_id":2,"tabs":[{"id":1,"title":"Console 1","server_id":null,"sql":"SELECT 1;","cursor_byte":0,"bound_table":null,"where_clause":"","order_by":null,"page_index":0,"page_size":500}],"connected_servers":[],"updated_at_secs":1}]}"#;
+        let legacy: SessionsStore = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.active_session().editor_height, 220);
+        assert_eq!(legacy.active_session().tabs[0].show_sql_editor, None);
 
         reloaded.delete_session(&dup_id).unwrap();
         assert_eq!(reloaded.sessions.len(), 1);

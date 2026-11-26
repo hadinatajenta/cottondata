@@ -65,6 +65,7 @@ impl CottonDataApp {
         }
 
         let editability = self.resolve_active_tab_editability();
+        let mut sql_editor_toggled = false;
 
         ui.horizontal_wrapped(|ui| {
             let tab = &mut self.tabs[self.active_tab_idx];
@@ -80,6 +81,7 @@ impl CottonDataApp {
                     .clicked()
                 {
                     tab.show_sql_editor = !tab.show_sql_editor;
+                    sql_editor_toggled = true;
                 }
                 toolbar_divider(ui, p);
                 ui.label(icon_text(icon::FUNNEL, p.accent, "WHERE", p.text_muted, 11.5));
@@ -243,6 +245,10 @@ impl CottonDataApp {
                     }
                 });
         });
+
+        if sql_editor_toggled {
+            self.mark_session_dirty();
+        }
 
         if let Some(page_index) = reload_page_idx {
             if self.tabs[self.active_tab_idx].mutator.has_changes() {
