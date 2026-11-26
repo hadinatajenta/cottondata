@@ -2,6 +2,15 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.11.1] — 2026-11-27
+
+### Fixed
+- **Crash on launch with non-ASCII SQL**: `split_statements` sliced the script at byte offsets that could fall inside a multibyte character (accented letters, smart quotes, emoji, CJK), aborting the app on the first frame after a session was restored. The `DELIMITER` keyword and the active delimiter are now matched on bytes.
+- **Windows build**: PostgreSQL Unix socket support is limited to Unix platforms, and the in-app updater compiles against `zip` 2.
+
+### Added
+- Prebuilt Windows portable archive (`CottonData-windows-x64.zip`) and install instructions in the README.
+
 ## [0.11.0] — 2026-11-27
 
 ### Added
