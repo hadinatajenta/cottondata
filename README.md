@@ -76,7 +76,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.5.1
+# CottonData CLI v0.6.0
 open /Applications/CottonData.app
 ```
 
@@ -187,10 +187,11 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 - **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), and filters across servers with viewport culling for schemas containing hundreds of tables.
 - **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `mssql://`, `sqlserver://`), show/hide password, Unix sockets (MySQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
 - **Configurable server list**: 1 to 64 saved servers (default 10) from Settings. Saved servers cost almost no memory; only connected servers use RAM. `Cmd/Ctrl+1..0` switches the first ten.
-- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware completion, and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware completion, and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **Searchable History & Saved Queries / Snippets**: filter execution history by SQL, server, schema, or status without overwriting active consoles; save reusable SQL snippets (`Cmd/Ctrl+Shift+S`) with **Global** or **per-server** scope, folders, and pin-to-top.
 - **Result Grid & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), server-side `WHERE` filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
 - **DataGrip-style Inline Cell Editing**: edit cells directly inside table tabs and single-table `SELECT` console results (`Double-click`, `Enter`, `F2`, or type-to-edit). Tracks original column names (`org_name`), supports `NULL`/`DEFAULT`, lazy-loads >4 KiB truncated cells, commits atomically (using `SAVEPOINT` inside open transactions), saves directly with `Cmd/Ctrl+S` on non-PROD while requiring **SQL Preview** on `PROD`, and protects staged edits with an **Unsaved Changes** dialog.
-- **Copy and Export**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`, or export full pages to disk.
+- **Copy and Streaming Full-Result Export**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`. Export the current page or **stream entire tables / full query results** directly to disk with constant RAM, live progress, and Cancel support.
 - **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
 - **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, on focus loss, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
 - **Memory Guardrail**: all result grids share a 32 MiB budget with least-recently-used eviction.
@@ -205,6 +206,11 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 | Reopen last closed tab | `Cmd+Shift+T` | `Ctrl+Shift+T` |
 | Close active tab | `Cmd+W` | `Ctrl+W` |
 | Switch to server 1..10 | `Cmd+1..0` | `Ctrl+1..0` |
+| Find / Find & Replace in SQL editor | `Cmd+F` / `Cmd+H` | `Ctrl+F` / `Ctrl+H` |
+| Toggle line comment in SQL editor | `Cmd+/` | `Ctrl+/` |
+| Duplicate line / selection in SQL editor | `Cmd+Shift+D` | `Ctrl+Shift+D` |
+| Move line / selection up or down | `Alt+↑` / `Alt+↓` | `Alt+↑` / `Alt+↓` |
+| Save active SQL as snippet | `Cmd+Shift+S` | `Ctrl+Shift+S` |
 | Save staged grid edits (Preview on PROD) | `Cmd+S` | `Ctrl+S` |
 | Save inside New/Edit Connection modal | `Cmd+Enter` | `Ctrl+Enter` |
 | Start inline cell edit | `Double-click` / `Enter` / `F2` / type | `Double-click` / `Enter` / `F2` / type |
@@ -232,6 +238,7 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 | Saved servers | `servers.json` in the data directory | same | same |
 | Workspace sessions & open consoles | `sessions.json` in the data directory | same | same |
 | Query history (last 300 queries) | `history.json` in the data directory | same | same |
+| Saved queries / snippets | `snippets.json` in the data directory | same | same |
 | Passwords | macOS Keychain (optional, chosen per server) | kept in memory for the session | kept in memory for the session |
 
 | Environment variable | Used by | Purpose |

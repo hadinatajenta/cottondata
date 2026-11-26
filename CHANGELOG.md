@@ -2,6 +2,14 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.6.0] — 2026-11-26
+
+### Added
+- **Find & Replace in SQL Editor (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`)**: inline find/replace bar with live syntax-preserving match highlights, active-match contrast, Case-Sensitive (`Aa`) and Whole-Word (`W`) toggles, match counter, Prev/Next navigation, Replace, and Replace All (`crates/sql/src/edit.rs`).
+- **SQL Editor Line Editing Shortcuts**: Toggle Line Comment (`Cmd/Ctrl+/`), Duplicate Line / Selection (`Cmd/Ctrl+Shift+D`), and Move Line Up/Down (`Alt+↑` / `Alt+↓`) with accurate UTF-8 cursor and selection tracking.
+- **Searchable History & Saved Queries / Snippets**: real-time search + OK/Failed status filter + *Open in New Tab* / *Save as Snippet* in History, plus a new **Saved Queries** deck (`snippets.json`) with Global or per-server scope, folders, pin-to-top, and `Cmd/Ctrl+Shift+S` save modal.
+- **Constant-Memory Streaming Full-Result Export**: `DatabaseSession::stream_query` (MySQL `query_iter` + SQL Server `QueryStream`) paired with `StreamExporter` streams entire tables or full query results directly to CSV, TSV, JSON Lines, JSON Array, or SQL `INSERT` files on a background thread with live row progress and Cancel support while staying well within the 32 MiB RAM guardrail.
+
 ## [0.5.1] — 2026-11-26
 
 ### Fixed
