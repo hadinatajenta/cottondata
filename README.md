@@ -76,7 +76,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.8.1
+# CottonData CLI v0.9.0
 open /Applications/CottonData.app
 ```
 
@@ -300,3 +300,5 @@ crates/
 ## License
 
 Dual-licensed under **MIT** or **Apache-2.0**.
+
+Bundled fonts: [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), both under the SIL Open Font License 1.1 (see `assets/fonts/`).

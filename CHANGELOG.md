@@ -2,6 +2,14 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.9.0] — 2026-11-26
+
+### Changed
+- **Typography**: the UI now uses **Inter** and the SQL editor and result grid use **JetBrains Mono**, both embedded under the SIL Open Font License (`assets/fonts/`).
+- **Unified macOS titlebar**: the window content extends under a transparent titlebar, so the native title strip no longer clashes with the dark theme. The top strip still drags the window, and double-click toggles zoom.
+- **Calmer toolbars**: ghost button icons use the muted text color; tinted buttons (Stop, Commit, Rollback) only show their color while enabled.
+- **Fewer borders**: cards are separated by fill and a soft shadow instead of a 1px border, and inset panels use a softer divider stroke.
+
 ## [0.8.1] — 2026-11-26
 
 ### Changed
