@@ -39,6 +39,21 @@ impl MySqlDiagnostic {
             };
         }
 
+        if lower.contains("server does not have this capability")
+            || lower.contains("requires secure connection")
+        {
+            return Self {
+                code,
+                severity: DiagnosticSeverity::Warning,
+                summary: "MySQL server does not support TLS/SSL".into(),
+                hint: Some(
+                    "This MySQL server has SSL disabled. Switch TLS Mode to 'Disabled' or 'Preferred'."
+                        .into(),
+                ),
+                raw_message,
+            };
+        }
+
         if lower.contains("tls") || lower.contains("ssl") || lower.contains("handshake") || lower.contains("certificate") {
             return Self {
                 code,
@@ -101,5 +116,11 @@ mod tests {
 
         let tls = MySqlDiagnostic::classify("Remote host terminated the SSL handshake", None);
         assert!(tls.summary.contains("TLS"));
+
+        let no_tls = MySqlDiagnostic::classify(
+            "DriverError { Client requires secure connection but server does not have this capability }",
+            None,
+        );
+        assert!(no_tls.summary.contains("does not support TLS/SSL"));
     }
 }

@@ -36,8 +36,13 @@ impl MySqlError {
 impl std::fmt::Display for MySqlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.diagnostic.summary)?;
+        if !self.diagnostic.raw_message.is_empty()
+            && self.diagnostic.raw_message != self.diagnostic.summary
+        {
+            write!(f, " [{}]", self.diagnostic.raw_message)?;
+        }
         if let Some(hint) = &self.diagnostic.hint {
-            write!(f, " ({hint})")?;
+            write!(f, " — {hint}")?;
         }
         Ok(())
     }
@@ -95,8 +100,7 @@ pub struct MySqlSession {
 impl MySqlSession {
     pub fn connect(profile: &ServerProfile, password: Option<&str>) -> Result<Self, MySqlError> {
         let timeout = Duration::from_secs(profile.connect_timeout_secs.max(3) as u64);
-        let (tunnel, opts) = build_opts(profile, password, timeout)?;
-        let mut conn = Conn::new(opts).map_err(MySqlError::from_mysql)?;
+        let (tunnel, mut conn) = connect_with_tls_fallback(profile, password, timeout)?;
         let runtime = load_runtime_info(&mut conn)?;
         Ok(Self {
             conn,
@@ -371,8 +375,7 @@ impl MySqlSession {
         target_conn_id: u32,
     ) -> Result<(), MySqlError> {
         let timeout = Duration::from_secs(profile.connect_timeout_secs.max(3) as u64);
-        let (_tunnel, opts) = build_opts(profile, password, timeout)?;
-        let mut aux = Conn::new(opts).map_err(MySqlError::from_mysql)?;
+        let (_tunnel, mut aux) = connect_with_tls_fallback(profile, password, timeout)?;
         aux.query_drop(format!("KILL QUERY {target_conn_id}"))
             .map_err(MySqlError::from_mysql)
     }
@@ -387,6 +390,70 @@ impl MySqlSession {
             if let Ok(Some(db)) = self.conn.query_first::<Option<String>, _>("SELECT DATABASE()") {
                 self.runtime.current_schema = db;
             }
+        }
+    }
+}
+
+fn connect_with_tls_fallback(
+    profile: &ServerProfile,
+    password: Option<&str>,
+    timeout: Duration,
+) -> Result<(Option<SshTunnel>, Conn), MySqlError> {
+    let (tunnel, opts) = build_opts(profile, password, timeout)?;
+    match Conn::new(opts.clone()) {
+        Ok(conn) => Ok((tunnel, conn)),
+        Err(tls_err) if profile.tls == TlsMode::Preferred && is_tls_fallback_eligible(&tls_err) => {
+            let plain_opts = opts.ssl_opts(None);
+            match Conn::new(plain_opts) {
+                Ok(conn) => Ok((tunnel, conn)),
+                Err(mysql::Error::MySqlError(me)) if me.code == 3159 => {
+                    Err(MySqlError::message(format!(
+                        "Server requires TLS (ERROR 3159), and TLS handshake failed: {tls_err}"
+                    )))
+                }
+                Err(plain_err) => Err(MySqlError::from_mysql(plain_err)),
+            }
+        }
+        Err(err) => Err(MySqlError::from_mysql(err)),
+    }
+}
+
+fn is_tls_fallback_eligible(err: &mysql::Error) -> bool {
+    match err {
+        mysql::Error::DriverError(mysql::DriverError::TlsNotSupported) => true,
+        mysql::Error::TlsError(_) => true,
+        mysql::Error::IoError(io_err) => {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::NotFound
+            ) {
+                return false;
+            }
+            let lower = io_err.to_string().to_ascii_lowercase();
+            matches!(
+                io_err.kind(),
+                std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) || lower.contains("tls")
+                || lower.contains("ssl")
+                || lower.contains("handshake")
+                || lower.contains("alert")
+                || lower.contains("certificate")
+                || lower.contains("cipher")
+                || lower.contains("protocol")
+        }
+        _ => {
+            let lower = err.to_string().to_ascii_lowercase();
+            lower.contains("server does not have this capability")
+                || lower.contains("tls")
+                || lower.contains("ssl")
+                || lower.contains("handshake")
         }
     }
 }
@@ -611,5 +678,35 @@ fn mysql_type_label(t: ColumnType, flags: ColumnFlags) -> String {
         format!("{base} unsigned")
     } else {
         base.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferred_tls_fallback_matches_handshake_failures_only() {
+        let not_supported = mysql::Error::DriverError(mysql::DriverError::TlsNotSupported);
+        assert!(is_tls_fallback_eligible(&not_supported));
+
+        let alert = mysql::Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "received fatal alert: HandshakeFailure",
+        ));
+        assert!(is_tls_fallback_eligible(&alert));
+
+        let refused = mysql::Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert!(!is_tls_fallback_eligible(&refused));
+    }
+
+    #[test]
+    fn mysql_error_display_preserves_underlying_raw_detail() {
+        let err = MySqlError::message("received fatal alert: ProtocolVersion (TLSv1.0)");
+        let rendered = err.to_string();
+        assert!(rendered.contains("ProtocolVersion"));
     }
 }
