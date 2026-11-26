@@ -58,9 +58,7 @@ pub(crate) fn plan_connection(
             target.tunnel
         }
         ConnectionEndpoint::UnixSocket { path } => {
-            let (directory, port) = split_socket_path(path);
-            config.host_path(directory).port(port);
-            config.ssl_mode(SslMode::Disable);
+            apply_unix_socket(&mut config, path)?;
             None
         }
         ConnectionEndpoint::File { path } => {
@@ -73,6 +71,22 @@ pub(crate) fn plan_connection(
     Ok(ConnectPlan { config, tunnel })
 }
 
+#[cfg(unix)]
+fn apply_unix_socket(config: &mut Config, path: &str) -> Result<(), DbError> {
+    let (directory, port) = split_socket_path(path);
+    config.host_path(directory).port(port);
+    config.ssl_mode(SslMode::Disable);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_unix_socket(_config: &mut Config, path: &str) -> Result<(), DbError> {
+    Err(DbError::message(format!(
+        "Unix sockets are not supported on this platform: {path}"
+    )))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
 fn split_socket_path(path: &str) -> (String, u16) {
     let trimmed = path.trim();
     let candidate = Path::new(trimmed);

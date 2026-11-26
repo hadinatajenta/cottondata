@@ -865,7 +865,7 @@ fn apply_windows_portable_update(zip_path: &Path, exe_path: &Path) -> Result<App
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Failed reading zip entry: {e}"))?;
-        let Some(rel_path) = entry.enclosed_name().map(Path::to_path_buf) else {
+        let Some(rel_path) = entry.enclosed_name() else {
             continue;
         };
         if entry.is_dir() {

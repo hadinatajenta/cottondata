@@ -21,7 +21,7 @@ Every block is non-interactive, needs no `sudo` unless noted, and ends with a ch
 | macOS 12+ | Apple Silicon (`arm64`) | Prebuilt release | [macOS Apple Silicon](#macos-apple-silicon-prebuilt) |
 | macOS 12+ | Intel (`x86_64`) | Build from source | [macOS Intel](#macos-intel-build-from-source) |
 | Linux | `x86_64` or `aarch64` | Build from source | [Linux](#linux-build-from-source) |
-| Windows 10/11 | `x86_64` | Build from source | [Windows](#windows-build-from-source) |
+| Windows 10/11 | `x86_64` | Prebuilt release | [Windows](#windows-prebuilt) |
 
 Detect the platform:
 
@@ -140,6 +140,23 @@ Verify:
 
 The user install puts `CottonData` and `cottondata-cli` in `~/.local/bin` and adds a desktop entry.
 On Debian-based systems the script also writes `dist/cottondata_<version>_<arch>.deb`, which can be installed system-wide with `sudo apt-get install ./dist/cottondata_*.deb`.
+
+### Windows (prebuilt)
+
+PowerShell, as a normal user:
+
+```powershell
+$ErrorActionPreference = "Stop"
+$InstallDir = "$env:LOCALAPPDATA\Programs\CottonData"
+Invoke-WebRequest "https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-windows-x64.zip" -OutFile "$env:TEMP\CottonData.zip"
+Expand-Archive "$env:TEMP\CottonData.zip" -DestinationPath $env:TEMP\CottonData-extract -Force
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+Copy-Item "$env:TEMP\CottonData-extract\CottonData-windows-x64\*" $InstallDir -Recurse -Force
+& "$InstallDir\cottondata-cli.exe" doctor | Select-Object -First 1
+& "$InstallDir\CottonData.exe"
+```
+
+Or download `CottonData-windows-x64.zip` from the [Releases](https://github.com/hadinatajenta/cottondata/releases/latest) page, extract it, and run `CottonData.exe`.
 
 ### Windows (build from source)
 
