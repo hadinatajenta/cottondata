@@ -76,7 +76,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.4.4
+# CottonData CLI v0.5.0
 open /Applications/CottonData.app
 ```
 
