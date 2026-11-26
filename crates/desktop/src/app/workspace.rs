@@ -160,14 +160,20 @@ impl CottonDataApp {
                                     };
                                     let dirty_mark = if tab.mutator.has_changes() { "• " } else { "" };
                                     let label = match tab.slot {
-                                        Some(slot) => format!("{dirty_mark}{slot} {}", tab.title),
+                                        Some(slot) => {
+                                            let display_num = self
+                                                .registry
+                                                .display_number_of(slot)
+                                                .unwrap_or_else(|| slot.display_number());
+                                            format!("{dirty_mark}#{display_num} {}", tab.title)
+                                        }
                                         None => format!("{dirty_mark}{}", tab.title),
                                     };
                                     let env_accent = tab
                                         .slot
                                         .and_then(|s| self.registry.get(s))
                                         .map(|sl| {
-                                            let [r, g, b] = sl.profile.environment.rgb();
+                                            let [r, g, b] = sl.profile.env_display_rgb();
                                             egui::Color32::from_rgb(r, g, b)
                                         });
                                     let response = document_tab(

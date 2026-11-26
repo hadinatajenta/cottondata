@@ -8,6 +8,7 @@ pub use diagnostics::{DbDiagnostic, DiagnosticSeverity};
 pub use dialect::{DatabaseEngine, SqlDialect};
 pub use registry::{
     ConnectionEndpoint, ConnectionStatus, EnvironmentTag, ServerProfile, ServerRegistry,
-    ServerRuntimeInfo, ServerSlot, ServerSlotId, SshTunnelConfig, TlsMode, DEFAULT_MAX_SERVERS, SERVER_SLOT_CAPACITY,
-    MAX_SOCKETS_PER_SERVER,
+    ServerRuntimeInfo, ServerSlot, ServerSlotId, SshTunnelConfig, TlsMode, DEFAULT_MAX_SERVERS,
+    DEFAULT_PAGE_SIZE, MAX_ENVIRONMENT_LABEL_CHARS, MAX_SOCKETS_PER_SERVER, SERVER_SLOT_CAPACITY,
+    UNLIMITED_ROWS,
 };

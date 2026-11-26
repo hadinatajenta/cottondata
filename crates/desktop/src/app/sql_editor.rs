@@ -1,15 +1,16 @@
 use super::completion_popup::{
     collect_visible_completions, consume_completion_keys, render_completion_popup, typed_word, CompletionKeyAction,
 };
+use super::query_tab::{limit_label, QUERY_LIMIT_PRESETS};
 use super::{insert_completion, CottonDataApp};
-use crate::theme::{highlight_mysql_editor_with_matches, Palette};
+use crate::theme::{highlight_mysql_editor_cached, Palette};
 use crate::ui_kit::{
     banner, caption, ghost_button, icon, icon_button, inset_frame, primary_button, secondary_button,
     styled_text_input, tinted_ghost_button, toolbar_divider,
 };
 use crate::worker::SlotCmd;
 use cottondata_sql::{
-    analyze_statement, duplicate_lines, find_matches, format_mysql, move_lines_down, move_lines_up,
+    analyze_statement, duplicate_lines, format_mysql, move_lines_down, move_lines_up,
     replace_all_matches, replace_match, statement_at_offset, toggle_line_comment, EditResult,
     SearchOptions, WriteClass,
 };
@@ -62,6 +63,9 @@ impl CottonDataApp {
             )
         };
 
+        let effective_limit = self.effective_tab_limit(self.active_tab_idx);
+        let mut selected_limit: Option<u32> = None;
+
         ui.horizontal(|ui| {
             let run_label = if has_selection { "Run selected" } else { "Run" };
             run_current = primary_button(ui, p, icon::PLAY, run_label, !is_running)
@@ -73,6 +77,26 @@ impl CottonDataApp {
             stop_query = tinted_ghost_button(ui, p.danger, icon::STOP, "Stop", is_running)
                 .on_hover_text("Cancel the running statement")
                 .clicked();
+            toolbar_divider(ui, p);
+            let limit_text = format!("Limit: {}", limit_label(effective_limit));
+            egui::ComboBox::from_id_salt(("query_auto_limit", self.tabs[self.active_tab_idx].id))
+                .selected_text(RichText::new(limit_text).size(12.0).color(p.text_primary))
+                .width(102.0)
+                .show_ui(ui, |ui| {
+                    ui.label(
+                        RichText::new("Server-side auto-limit")
+                            .size(10.5)
+                            .strong()
+                            .color(p.text_muted),
+                    );
+                    for &(preset, label) in QUERY_LIMIT_PRESETS {
+                        if ui.selectable_label(effective_limit == preset, label).clicked() {
+                            selected_limit = Some(preset);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Auto-limit for SELECT queries without an explicit LIMIT/TOP");
             toolbar_divider(ui, p);
             if ghost_button(ui, p, icon::CHART_BAR, "Explain", !is_running).clicked() {
                 do_explain = Some(false);
@@ -117,6 +141,9 @@ impl CottonDataApp {
         });
         ui.add_space(4.0);
 
+        if let Some(new_limit) = selected_limit {
+            self.tabs[self.active_tab_idx].row_limit = Some(new_limit);
+        }
         if open_find_bar {
             self.open_sql_find(false);
         }
@@ -233,13 +260,9 @@ impl CottonDataApp {
         let mut caret_screen_rect = None;
 
         let (search_matches, active_match_idx) = {
-            let tab = &self.tabs[self.active_tab_idx];
+            let tab = &mut self.tabs[self.active_tab_idx];
             if tab.find_replace.open && !tab.find_replace.query.is_empty() {
-                let opts = SearchOptions {
-                    case_sensitive: tab.find_replace.case_sensitive,
-                    whole_word: tab.find_replace.whole_word,
-                };
-                let matches = find_matches(&tab.sql, &tab.find_replace.query, opts);
+                let matches = tab.find_replace.matches_for(&tab.sql).to_vec();
                 let active = if matches.is_empty() {
                     None
                 } else {
@@ -252,8 +275,16 @@ impl CottonDataApp {
         };
 
         let palette_copy = p;
+        let hl_cache_id = egui::Id::new(("sql_hl", tab_id));
         let mut layouter = move |ui: &egui::Ui, string: &str, _wrap_width: f32| {
-            highlight_mysql_editor_with_matches(ui, string, palette_copy, &search_matches, active_match_idx)
+            highlight_mysql_editor_cached(
+                ui,
+                hl_cache_id,
+                string,
+                palette_copy,
+                &search_matches,
+                active_match_idx,
+            )
         };
 
         let editor_h = self.editor_height;
@@ -441,7 +472,7 @@ impl CottonDataApp {
             case_sensitive: tab.find_replace.case_sensitive,
             whole_word: tab.find_replace.whole_word,
         };
-        let matches = find_matches(&tab.sql, &tab.find_replace.query, opts);
+        let matches = tab.find_replace.matches_for(&tab.sql).to_vec();
         if !matches.is_empty() && tab.find_replace.active_match >= matches.len() {
             tab.find_replace.active_match = 0;
         }

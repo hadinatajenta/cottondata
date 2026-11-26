@@ -1,3 +1,4 @@
+use super::query_tab::{MAX_APPENDED_ROWS, MAX_AUTO_SCROLL_ROWS};
 use super::result_table::{
     compute_column_widths, compute_single_column_width, render_result_table, ResultTableView,
 };
@@ -5,10 +6,10 @@ use super::{CottonDataApp, PendingDiscardAction};
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
 use crate::ui_kit::{
-    busy_indicator, empty_state, ghost_button, icon, icon_button, icon_text, inset_frame, loading_state,
-    primary_button,
+    busy_indicator, caption, empty_state, ghost_button, icon, icon_button, icon_text, inset_frame, loading_state,
+    pill, primary_button,
 };
-use cottondata_grid::{CellValue, Editability};
+use cottondata_grid::{CellValue, Editability, SortDirection};
 use eframe::egui::{self, RichText};
 
 impl CottonDataApp {
@@ -21,8 +22,13 @@ impl CottonDataApp {
     ) {
         ui.add_space(4.0);
 
-        let mut clicked_sort_col: Option<String> = None;
+        let mut clicked_sort_col: Option<(usize, String)> = None;
+        let mut header_sort_override: Option<(usize, String, Option<SortDirection>)> = None;
         let mut load_full_cell_req: Option<(usize, usize)> = None;
+        let mut load_more_req = false;
+        let mut rerun_unlimited_req = false;
+        let can_load_more = self.can_load_more_for_tab(self.active_tab_idx);
+        let next_batch_size = self.effective_tab_batch_size(self.active_tab_idx);
         let available_h = ui.available_height().max(160.0);
 
         self.handle_table_shortcuts(ui.ctx(), &editability);
@@ -62,7 +68,7 @@ impl CottonDataApp {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     let tab = &mut self.tabs[self.active_tab_idx];
-                    let Some(page) = &tab.page else {
+                    let Some(page) = tab.page.clone() else {
                         if tab.is_running {
                             loading_state(ui, p, "Running query…");
                         } else {
@@ -72,39 +78,177 @@ impl CottonDataApp {
                     };
 
                     if tab.column_widths.len() != page.columns.len() {
-                        tab.column_widths = compute_column_widths(ui, page);
+                        tab.column_widths = compute_column_widths(ui, &page);
                     }
-                    let is_sortable = bound_table.is_some() && !tab.is_running;
-                    let view = ResultTableView {
-                        palette: p,
-                        tab_id: tab.id,
-                        page,
-                        mutator: &tab.mutator,
-                        focused_cell: tab.selected_cell,
-                        row_selection: &tab.row_selection,
-                        selected_row_count: tab.row_selection.sorted_rows_below(page.row_count).len(),
-                        column_widths: &tab.column_widths,
-                        order_by: tab.filter_sort.order_by.as_ref(),
-                        is_sortable,
-                        editability: &editability,
-                        table_detail: cached_detail.as_ref(),
+                    let has_filter_query = !tab.grid_filter.query.trim().is_empty();
+                    if has_filter_query {
+                        let gen = tab.page_generation;
+                        let mutator = &tab.mutator;
+                        tab.grid_filter.ensure_synced(gen, &page, |r, c| {
+                            mutator.get_modified(r, c).map(|v| v.as_display_str())
+                        });
+                    }
+                    let combined_rows: Option<Vec<usize>> = match (&tab.console_sorted_indices, has_filter_query) {
+                        (Some(sorted), true) => {
+                            let mut in_filter = vec![false; page.row_count];
+                            for &r in &tab.grid_filter.matched_rows {
+                                if let Some(slot) = in_filter.get_mut(r) {
+                                    *slot = true;
+                                }
+                            }
+                            Some(
+                                sorted
+                                    .iter()
+                                    .copied()
+                                    .filter(|&r| in_filter.get(r).copied().unwrap_or(false))
+                                    .collect(),
+                            )
+                        }
+                        _ => None,
                     };
-                    let interaction = render_result_table(ui, &view, tab.inline_editor.as_mut());
+                    let visible_rows: Option<&[usize]> = if let Some(combined) = combined_rows.as_deref() {
+                        Some(combined)
+                    } else if has_filter_query {
+                        Some(tab.grid_filter.matched_rows.as_slice())
+                    } else {
+                        tab.console_sorted_indices.as_deref()
+                    };
+
+                    let active_order_by: Option<(String, SortDirection)> = if bound_table.is_some() {
+                        tab.filter_sort.order_by.clone()
+                    } else {
+                        tab.console_sort
+                            .as_ref()
+                            .map(|(_, col, dir)| (col.clone(), *dir))
+                    };
+
+                    let show_footer = page.has_more_rows || tab.is_loading_more;
+                    let footer_h = if show_footer { 34.0 } else { 0.0 };
+                    let table_h = (available_h - footer_h).max(120.0);
+                    let is_sortable = !page.columns.is_empty() && !tab.is_running && !tab.is_loading_more;
+                    let interaction = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(grid_w, table_h),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                let view = ResultTableView {
+                                    palette: p,
+                                    tab_id: tab.id,
+                                    page: &page,
+                                    visible_rows,
+                                    mutator: &tab.mutator,
+                                    focused_cell: tab.selected_cell,
+                                    row_selection: &tab.row_selection,
+                                    selected_row_count: tab.row_selection.sorted_rows_below(page.row_count).len(),
+                                    column_widths: &tab.column_widths,
+                                    order_by: active_order_by.as_ref(),
+                                    is_sortable,
+                                    editability: &editability,
+                                    table_detail: cached_detail.as_ref(),
+                                };
+                                render_result_table(ui, &view, tab.inline_editor.as_mut())
+                            },
+                        )
+                        .inner;
                     if let Some((col_idx, new_w)) = interaction.resized_column {
                         if let Some(slot_w) = tab.column_widths.get_mut(col_idx) {
                             *slot_w = new_w;
                         }
                     }
                     if let Some(col_idx) = interaction.autofit_column {
-                        let fit_w = compute_single_column_width(ui, page, col_idx);
+                        let fit_w = compute_single_column_width(ui, &page, col_idx);
                         if let Some(slot_w) = tab.column_widths.get_mut(col_idx) {
                             *slot_w = fit_w;
                         }
                     }
-                    if let Some(column_index) = interaction.clicked_header.filter(|_| is_sortable) {
-                        clicked_sort_col = Some(page.columns[column_index].name.clone());
+                    if interaction.autofit_all_columns {
+                        tab.column_widths = compute_column_widths(ui, &page);
+                    }
+                    if interaction.reset_column_widths {
+                        tab.column_widths.clear();
+                    }
+                    if let Some((col_idx, dir)) = interaction.header_sort_override.filter(|_| is_sortable) {
+                        if let Some(col) = page.columns.get(col_idx) {
+                            header_sort_override = Some((col_idx, col.name.clone(), dir));
+                        }
+                    } else if let Some(column_index) = interaction.clicked_header.filter(|_| is_sortable) {
+                        if let Some(col) = page.columns.get(column_index) {
+                            clicked_sort_col = Some((column_index, col.name.clone()));
+                        }
                     }
                     pending_action = interaction.action;
+
+                    let has_inserted_rows = !tab.mutator.inserted_rows().is_empty();
+                    let row_count = page.row_count;
+                    let has_more_rows = page.has_more_rows;
+                    if interaction.reached_scroll_bottom
+                        && tab.auto_fetch_on_scroll
+                        && !tab.is_running
+                        && !tab.is_loading_more
+                        && !tab.scroll_fetch_failed
+                        && !has_inserted_rows
+                        && has_more_rows
+                        && row_count < MAX_AUTO_SCROLL_ROWS
+                        && can_load_more
+                    {
+                        load_more_req = true;
+                    }
+
+                    if show_footer {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if tab.is_loading_more {
+                                busy_indicator(ui, p, &format!("Loading next {next_batch_size} rows…"));
+                            } else if has_more_rows {
+                                let badge_label = if bound_table.is_none() {
+                                    format!("{row_count}+ rows · auto-limited")
+                                } else if tab.loaded_keyset_order.is_some() {
+                                    format!("{row_count}+ rows · keyset seek")
+                                } else {
+                                    format!("{row_count}+ rows")
+                                };
+                                pill(ui, &badge_label, p.accent);
+                                if row_count >= MAX_APPENDED_ROWS {
+                                    caption(
+                                        ui,
+                                        p,
+                                        format!(
+                                            "In-memory cap reached ({MAX_APPENDED_ROWS} rows) — use Export → Stream all"
+                                        ),
+                                    );
+                                } else if has_inserted_rows {
+                                    caption(ui, p, "Save or revert inserted rows to load more");
+                                } else if can_load_more {
+                                    if ghost_button(
+                                        ui,
+                                        p,
+                                        icon::ARROW_DOWN,
+                                        &format!("Load +{next_batch_size}"),
+                                        !tab.is_running,
+                                    )
+                                    .clicked()
+                                    {
+                                        load_more_req = true;
+                                    }
+                                    ui.checkbox(&mut tab.auto_fetch_on_scroll, "Auto-fetch on scroll")
+                                        .on_hover_text(format!(
+                                            "Automatically load the next batch when scrolling near the bottom (pauses at {MAX_AUTO_SCROLL_ROWS} rows)"
+                                        ));
+                                    if row_count >= MAX_AUTO_SCROLL_ROWS && tab.auto_fetch_on_scroll {
+                                        caption(ui, p, "Auto-scroll paused");
+                                    }
+                                }
+                                if bound_table.is_none()
+                                    && ghost_button(ui, p, icon::FAST_FORWARD, "Run without limit", !tab.is_running)
+                                        .on_hover_text("Re-run this query once without server-side auto-limit")
+                                        .clicked()
+                                {
+                                    rerun_unlimited_req = true;
+                                }
+                            }
+                        });
+                    }
                 },
             );
 
@@ -252,6 +396,14 @@ impl CottonDataApp {
             }
         });
 
+        if load_more_req {
+            self.request_load_more_active_tab();
+        }
+
+        if rerun_unlimited_req {
+            self.request_rerun_active_query_unlimited();
+        }
+
         if let Some((row, col)) = load_full_cell_req {
             self.request_load_full_cell(row, col);
         }
@@ -260,11 +412,36 @@ impl CottonDataApp {
             self.apply_table_action(ui.ctx(), action, &editability);
         }
 
-        if let Some(col_name) = clicked_sort_col {
-            if self.tabs[self.active_tab_idx].mutator.has_changes() {
-                self.unsaved_guard_modal = Some(PendingDiscardAction::SortColumn(col_name));
+        if let Some((col_idx, col_name, dir)) = header_sort_override {
+            let needs_reload = bound_table.is_some()
+                || self.tabs[self.active_tab_idx]
+                    .page
+                    .as_ref()
+                    .is_some_and(|pg| pg.has_more_rows);
+            if needs_reload && self.tabs[self.active_tab_idx].mutator.has_changes() {
+                self.unsaved_guard_modal = Some(PendingDiscardAction::SortColumnExplicit {
+                    col_idx,
+                    col_name,
+                    direction: dir,
+                });
             } else {
-                self.apply_sort_column(col_name);
+                self.apply_explicit_sort(col_idx, col_name, dir);
+            }
+        } else if let Some((col_idx, col_name)) = clicked_sort_col {
+            let next_dir = self.next_sort_direction_for_active_tab(&col_name);
+            let needs_reload = bound_table.is_some()
+                || self.tabs[self.active_tab_idx]
+                    .page
+                    .as_ref()
+                    .is_some_and(|pg| pg.has_more_rows);
+            if needs_reload && self.tabs[self.active_tab_idx].mutator.has_changes() {
+                self.unsaved_guard_modal = Some(PendingDiscardAction::SortColumnExplicit {
+                    col_idx,
+                    col_name,
+                    direction: next_dir,
+                });
+            } else {
+                self.apply_explicit_sort(col_idx, col_name, next_dir);
             }
         }
     }

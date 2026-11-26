@@ -6,6 +6,7 @@ use eframe::egui::{
     text::{LayoutJob, TextWrapping},
     Color32, FontFamily, FontId, Galley, Rect, Stroke, TextFormat, Ui,
 };
+use std::borrow::Cow;
 use std::sync::Arc;
 
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -14,10 +15,34 @@ const HEADER_ICON_ALLOWANCE: f32 = 40.0;
 const WIDTH_SAMPLE_ROWS: usize = 40;
 const MAX_RENDERED_CHARS: usize = 120;
 
-pub(super) struct CellDisplay {
-    pub(super) text: String,
+pub(super) struct CellDisplay<'a> {
+    pub(super) text: Cow<'a, str>,
     pub(super) is_null: bool,
     pub(super) background: Color32,
+}
+
+pub(crate) fn sanitize_cell_text<'a>(raw: &'a str, max_chars: usize) -> Cow<'a, str> {
+    let has_control = raw
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'\n' | b'\r' | b'\t'));
+    if !has_control && (raw.len() <= max_chars || raw.chars().take(max_chars + 1).count() <= max_chars) {
+        return Cow::Borrowed(raw);
+    }
+
+    let mut out = String::with_capacity(raw.len().min(max_chars.saturating_mul(4)));
+    let mut chars = raw.chars();
+    for ch in chars.by_ref().take(max_chars) {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    Cow::Owned(out)
 }
 
 pub(in crate::app) fn compute_column_widths(ui: &Ui, page: &ColumnarPage) -> Vec<f32> {
@@ -78,20 +103,20 @@ pub(super) fn modified_cell_tooltip(view: &ResultTableView, row: usize, column: 
     ))
 }
 
-fn cell_display(view: &ResultTableView, row: usize, column: usize) -> CellDisplay {
+fn cell_display<'a>(view: &'a ResultTableView<'a>, row: usize, column: usize) -> CellDisplay<'a> {
     let palette = view.palette;
     let page = view.page;
     if row >= page.row_count {
         let value = &view.mutator.inserted_rows()[row - page.row_count][column];
         return CellDisplay {
-            text: truncate_display(value.as_display_str(), MAX_RENDERED_CHARS),
+            text: sanitize_cell_text(value.as_display_str(), MAX_RENDERED_CHARS),
             is_null: value.is_null() || value.is_default(),
             background: palette.cell_inserted,
         };
     }
     if let Some(modified) = view.mutator.get_modified(row, column) {
         return CellDisplay {
-            text: truncate_display(modified.as_display_str(), MAX_RENDERED_CHARS),
+            text: sanitize_cell_text(modified.as_display_str(), MAX_RENDERED_CHARS),
             is_null: modified.is_null() || modified.is_default(),
             background: palette.cell_modified,
         };
@@ -105,12 +130,12 @@ fn cell_display(view: &ResultTableView, row: usize, column: usize) -> CellDispla
     };
     match page.cell_str(row, column) {
         None => CellDisplay {
-            text: "NULL".into(),
+            text: Cow::Borrowed("NULL"),
             is_null: true,
             background,
         },
         Some(text) => CellDisplay {
-            text: truncate_display(text, MAX_RENDERED_CHARS).replace(['\n', '\r', '\t'], " "),
+            text: sanitize_cell_text(text, MAX_RENDERED_CHARS),
             is_null: false,
             background,
         },
@@ -143,13 +168,14 @@ pub(super) fn single_line_galley(ui: &Ui, mut job: LayoutJob, max_width: f32) ->
     ui.fonts(|fonts| fonts.layout_job(job))
 }
 
-pub(super) fn paint_cell(
+pub(super) fn render_data_cell_with_fk(
     ui: &Ui,
     view: &ResultTableView,
     row: usize,
     column: usize,
     cell_rect: Rect,
     is_row_highlighted: bool,
+    has_outbound_fk: bool,
 ) {
     let palette = view.palette;
     let display = cell_display(view, row, column);
@@ -159,10 +185,10 @@ pub(super) fn paint_cell(
         ui.painter().rect_filled(cell_rect, 0.0, display.background);
     }
 
-    let has_outbound_fk = !display.is_null && row < view.page.row_count && view.outbound_fk_for_column(column).is_some();
+    let show_outbound_fk = has_outbound_fk && !display.is_null && row < view.page.row_count;
     let text_color = if display.is_null {
         palette.text_muted
-    } else if has_outbound_fk {
+    } else if show_outbound_fk {
         palette.accent
     } else {
         palette.text_primary
@@ -186,7 +212,7 @@ pub(super) fn paint_cell(
     let galley_w = galley.size().x;
     let galley_h = galley.size().y;
     ui.painter().galley(egui::pos2(text_x, text_y), galley, text_color);
-    if has_outbound_fk {
+    if show_outbound_fk {
         ui.painter().hline(
             text_x..=(text_x + galley_w),
             text_y + galley_h - 0.5,
@@ -201,5 +227,30 @@ pub(super) fn paint_cell(
             Stroke::new(1.5, palette.accent),
             egui::StrokeKind::Inside,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_cell_text_borrows_clean_short_values_without_allocating() {
+        let clean = sanitize_cell_text("ada@example.com", 120);
+        assert!(matches!(clean, Cow::Borrowed("ada@example.com")));
+
+        let multibyte = sanitize_cell_text("café résumé", 12);
+        assert!(matches!(multibyte, Cow::Borrowed("café résumé")));
+    }
+
+    #[test]
+    fn sanitize_cell_text_replaces_control_whitespace_and_truncates() {
+        let multiline = sanitize_cell_text("line1\nline2\tval\rend", 120);
+        assert!(matches!(multiline, Cow::Owned(_)));
+        assert_eq!(multiline.as_ref(), "line1 line2 val end");
+
+        let long = sanitize_cell_text("abcdefghij", 5);
+        assert!(matches!(long, Cow::Owned(_)));
+        assert_eq!(long.as_ref(), "abcde…");
     }
 }

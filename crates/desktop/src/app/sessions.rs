@@ -140,16 +140,37 @@ impl CottonDataApp {
 
     pub(super) fn reload_bound_tables_for_slot(&mut self, slot: ServerSlotId) {
         let mut to_load = Vec::new();
-        for tab in &mut self.tabs {
-            if tab.slot == Some(slot) && tab.page.is_none() && !tab.is_running {
-                if let Some((schema, table)) = tab.bound_table.clone() {
+        for tab_idx in 0..self.tabs.len() {
+            if self.tabs[tab_idx].slot == Some(slot)
+                && self.tabs[tab_idx].page.is_none()
+                && !self.tabs[tab_idx].is_running
+            {
+                if let Some((schema, table)) = self.tabs[tab_idx].bound_table.clone() {
+                    let single_pk = self.single_pk_for_table(slot, &schema, &table);
+                    let default_order_column = if self.tabs[tab_idx].filter_sort.order_by.is_none() {
+                        single_pk.clone()
+                    } else {
+                        None
+                    };
+                    let keyset_order = match &self.tabs[tab_idx].filter_sort.order_by {
+                        None => single_pk.map(|pk| (pk, cottondata_grid::SortDirection::Asc)),
+                        Some((col, dir)) if single_pk.as_deref().is_some_and(|pk| pk.eq_ignore_ascii_case(col)) => {
+                            Some((col.clone(), *dir))
+                        }
+                        _ => None,
+                    };
+                    let tab = &mut self.tabs[tab_idx];
                     tab.is_running = true;
+                    tab.is_loading_more = false;
+                    tab.scroll_fetch_failed = false;
+                    tab.loaded_batch_size = tab.filter_sort.page_size.max(20);
+                    tab.loaded_keyset_order = keyset_order;
                     tab.last_status_msg = "Loading table page…".into();
-                    to_load.push((tab.id, schema, table, tab.filter_sort.clone()));
+                    to_load.push((tab.id, schema, table, tab.filter_sort.clone(), default_order_column));
                 }
             }
         }
-        for (tab_id, schema, table, filter_sort) in to_load {
+        for (tab_id, schema, table, filter_sort, default_order_column) in to_load {
             self.hub.send(
                 slot,
                 SlotCmd::LoadTablePage {
@@ -157,6 +178,8 @@ impl CottonDataApp {
                     schema,
                     table,
                     filter_sort,
+                    default_order_column,
+                    keyset_seek: None,
                 },
             );
         }

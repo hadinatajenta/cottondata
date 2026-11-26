@@ -1,10 +1,12 @@
-use cottondata_core::{ConnectionEndpoint, DbDiagnostic, ServerProfile, ServerRuntimeInfo, SqlDialect, TlsMode};
+use cottondata_core::{
+    ConnectionEndpoint, DbDiagnostic, ServerProfile, ServerRuntimeInfo, SqlDialect, TlsMode, UNLIMITED_ROWS,
+};
 use cottondata_driver::{
     DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, SchemaObjects, SchemaSummary,
     ServerHealthMetrics, SshTunnel, TableDetail,
 };
 use cottondata_grid::{CellValue, ColumnMeta, ColumnarPage};
-use cottondata_sql::{analyze_statement, is_explainable_statement};
+use cottondata_sql::{analyze_statement, has_explicit_row_limit, is_explainable_statement, is_pageable_read_query};
 use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts, Value};
@@ -42,6 +44,7 @@ pub struct MySqlSession {
     tunnel: Option<SshTunnel>,
     runtime: ServerRuntimeInfo,
     read_only: bool,
+    active_select_limit: Option<u64>,
 }
 
 impl MySqlSession {
@@ -54,7 +57,21 @@ impl MySqlSession {
             tunnel,
             runtime,
             read_only: profile.read_only,
+            active_select_limit: None,
         })
+    }
+
+    fn ensure_select_limit(&mut self, desired: Option<u64>) -> Result<(), DbError> {
+        if self.active_select_limit == desired {
+            return Ok(());
+        }
+        let stmt = match desired {
+            Some(limit) => format!("SET SESSION sql_select_limit = {limit}"),
+            None => "SET SESSION sql_select_limit = DEFAULT".to_string(),
+        };
+        self.conn.query_drop(stmt).map_err(mysql_error)?;
+        self.active_select_limit = desired;
+        Ok(())
     }
 
     pub fn conn_mut(&mut self) -> &mut Conn {
@@ -82,6 +99,8 @@ impl MySqlSession {
             if let Ok(Some(db)) = self.conn.query_first::<Option<String>, _>("SELECT DATABASE()") {
                 self.runtime.current_schema = db;
             }
+        } else if upper.starts_with("SET ") {
+            self.active_select_limit = None;
         }
     }
 
@@ -162,6 +181,16 @@ impl DatabaseSession for MySqlSession {
     fn execute_sql(&mut self, sql: &str, max_rows: u32) -> Result<QueryOutcome, DbError> {
         self.ensure_writable(sql)?;
 
+        let unlimited = max_rows == UNLIMITED_ROWS;
+        let cap = if unlimited {
+            usize::MAX
+        } else {
+            max_rows.max(1) as usize
+        };
+        let desired_server_limit = (!unlimited && is_pageable_read_query(sql) && !has_explicit_row_limit(sql))
+            .then(|| u64::from(max_rows.max(1)).saturating_add(1));
+        self.ensure_select_limit(desired_server_limit)?;
+
         let start = Instant::now();
         let mut result = self.conn.query_iter(sql).map_err(mysql_error)?;
         let cols_ref = result.columns();
@@ -185,7 +214,6 @@ impl DatabaseSession for MySqlSession {
         let (columns, col_types) = extract_mysql_columns(cols_slice);
 
         let mut page = ColumnarPage::new(columns, sql.to_string());
-        let cap = max_rows.max(1) as usize;
         let mut row_buf = Vec::with_capacity(col_types.len());
 
         for row_res in result.by_ref() {
@@ -195,14 +223,16 @@ impl DatabaseSession for MySqlSession {
                 break;
             }
             row_buf.clear();
-            for (idx, (col_type, flags)) in col_types.iter().enumerate() {
-                let val = row.as_ref(idx).cloned().unwrap_or(Value::NULL);
-                row_buf.push(format_mysql_value(val, *col_type, *flags));
+            let mut values = row.unwrap().into_iter();
+            for &(col_type, flags) in &col_types {
+                let val = values.next().unwrap_or(Value::NULL);
+                row_buf.push(format_mysql_value(val, col_type, flags));
             }
             page.push_row(&row_buf);
         }
 
         drop(result);
+        page.shrink_to_fit();
         page.elapsed_ms = start.elapsed().as_millis() as u64;
         self.sync_tx_state_after_stmt(sql);
         Ok(QueryOutcome::Rows(page))
@@ -216,6 +246,7 @@ impl DatabaseSession for MySqlSession {
         on_row: &mut dyn FnMut(&[Option<String>]) -> Result<bool, String>,
     ) -> Result<u64, DbError> {
         self.ensure_writable(sql)?;
+        self.ensure_select_limit(None)?;
 
         let mut result = self.conn.query_iter(sql).map_err(mysql_error)?;
         let (columns, col_types) = extract_mysql_columns(result.columns().as_ref());
@@ -251,6 +282,7 @@ impl DatabaseSession for MySqlSession {
         if statements.is_empty() {
             return Ok(0);
         }
+        self.ensure_select_limit(None)?;
 
         let start = Instant::now();
         let use_savepoint = self.runtime.in_transaction || !self.runtime.autocommit;
@@ -327,6 +359,7 @@ impl DatabaseSession for MySqlSession {
                 "EXPLAIN ANALYZE executes the query and is blocked for write statements in Read-Only mode.",
             ));
         }
+        self.ensure_select_limit(None)?;
 
         let start = Instant::now();
         let explain_sql = if analyze {
@@ -347,6 +380,7 @@ impl DatabaseSession for MySqlSession {
     }
 
     fn fetch_processlist(&mut self) -> Result<Vec<ProcessEntry>, DbError> {
+        self.ensure_select_limit(None)?;
         let rows: Vec<mysql::Row> = self
             .conn
             .query("SHOW FULL PROCESSLIST")
@@ -376,6 +410,7 @@ impl DatabaseSession for MySqlSession {
     }
 
     fn fetch_health_metrics(&mut self) -> Result<ServerHealthMetrics, DbError> {
+        self.ensure_select_limit(None)?;
         let rows: Vec<(String, String)> = self
             .conn
             .query(
@@ -407,14 +442,17 @@ impl DatabaseSession for MySqlSession {
     }
 
     fn list_schemas(&mut self) -> Result<Vec<SchemaSummary>, DbError> {
+        self.ensure_select_limit(None)?;
         crate::introspection::list_schemas(&mut self.conn)
     }
 
     fn load_schema_objects(&mut self, schema: &str) -> Result<SchemaObjects, DbError> {
+        self.ensure_select_limit(None)?;
         crate::introspection::load_schema_objects(&mut self.conn, schema)
     }
 
     fn load_table_detail(&mut self, schema: &str, table: &str) -> Result<TableDetail, DbError> {
+        self.ensure_select_limit(None)?;
         crate::introspection::load_table_detail(&mut self.conn, schema, table)
     }
 }

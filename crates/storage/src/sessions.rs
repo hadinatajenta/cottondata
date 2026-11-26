@@ -72,6 +72,10 @@ impl WorkspaceSession {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionsStore {
     pub version: u8,
@@ -80,6 +84,8 @@ pub struct SessionsStore {
     pub dark_theme: bool,
     #[serde(default)]
     pub show_system_schemas: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
     pub sessions: Vec<WorkspaceSession>,
 }
 
@@ -90,6 +96,7 @@ impl Default for SessionsStore {
             active_session_id: DEFAULT_SESSION_ID.to_string(),
             dark_theme: false,
             show_system_schemas: false,
+            auto_check_updates: true,
             sessions: vec![WorkspaceSession::new(DEFAULT_SESSION_ID, "Default")],
         }
     }
@@ -229,4 +236,54 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_enables_auto_check_updates() {
+        let store = SessionsStore::default();
+        assert!(store.auto_check_updates);
+    }
+
+    #[test]
+    fn legacy_sessions_json_defaults_auto_check_updates_to_true() {
+        let legacy_json = r#"{
+            "version": 1,
+            "active_session_id": "default",
+            "dark_theme": true,
+            "show_system_schemas": false,
+            "sessions": [
+                {
+                    "id": "default",
+                    "name": "Default",
+                    "active_server_id": null,
+                    "active_tab_idx": 0,
+                    "next_tab_id": 2,
+                    "tabs": [],
+                    "connected_servers": [],
+                    "updated_at_secs": 1700000000
+                }
+            ]
+        }"#;
+
+        let store: SessionsStore =
+            serde_json::from_str(legacy_json).expect("legacy sessions.json should deserialize cleanly");
+        assert!(store.auto_check_updates);
+        assert!(store.dark_theme);
+        assert_eq!(store.active_session_id, "default");
+    }
+
+    #[test]
+    fn roundtrips_disabled_auto_check_updates() {
+        let store = SessionsStore {
+            auto_check_updates: false,
+            ..SessionsStore::default()
+        };
+        let json = serde_json::to_string(&store).expect("serialize sessions store");
+        let parsed: SessionsStore = serde_json::from_str(&json).expect("deserialize sessions store");
+        assert!(!parsed.auto_check_updates);
+    }
 }

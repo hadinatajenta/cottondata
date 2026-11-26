@@ -61,7 +61,7 @@ fn run(args: &[String]) -> Result<(), String> {
                             slot.profile.name,
                             slot.profile.endpoint.display_address(),
                             slot.profile.username,
-                            slot.profile.environment.label(),
+                            slot.profile.env_display_label(),
                             ro,
                             ssh,
                         );

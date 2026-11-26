@@ -2,15 +2,20 @@ use super::er_diagram::ErRelation;
 use super::query_tab::{result_set_label, BottomDeckTab, StoredResultSet};
 use super::row_selection::RowSelection;
 use super::server_form::ConnectionTestState;
+use super::update_modal::UpdateStatus;
 use super::CottonDataApp;
+use crate::updater::ApplyOutcome;
 use crate::worker::{SlotCmd, WorkerEvent};
 use cottondata_core::ConnectionStatus;
 use cottondata_driver::QueryOutcome;
-use cottondata_grid::StagedMutator;
+use cottondata_grid::{ColumnarPage, StagedMutator};
 use cottondata_storage::ConnectedServerState;
+use eframe::egui;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 impl CottonDataApp {
-    pub(super) fn process_worker_events(&mut self) {
+    pub(super) fn process_worker_events(&mut self, ctx: &egui::Context) {
         let events = self.hub.poll_events();
         for ev in events {
             match ev {
@@ -45,11 +50,12 @@ impl CottonDataApp {
                         s.runtime = None;
                     }
                     self.catalogs[slot.index()] = None;
-                    self.table_details.retain(|(s, _, _), _| *s != slot.index());
+                    self.table_details.retain_slot_ne(slot.index());
                     self.table_details_loading.retain(|(s, _, _)| *s != slot.index());
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
                     self.clear_slot_activity(slot);
+                    crate::purge_unused_memory();
                     self.persist_sessions_now();
                     self.notify_info(format!("Disconnected from {label}"));
                 }
@@ -63,11 +69,12 @@ impl CottonDataApp {
                         )
                     });
                     self.catalogs[slot.index()] = None;
-                    self.table_details.retain(|(s, _, _), _| *s != slot.index());
+                    self.table_details.retain_slot_ne(slot.index());
                     self.table_details_loading.retain(|(s, _, _)| *s != slot.index());
                     self.processlists[slot.index()].clear();
                     self.health[slot.index()] = None;
                     self.clear_slot_activity(slot);
+                    crate::purge_unused_memory();
                     if let Some(s) = self.registry.get_mut(slot) {
                         s.runtime = None;
                     }
@@ -98,11 +105,17 @@ impl CottonDataApp {
                     }
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tid) {
+                            let was_loading_more = tab.is_loading_more;
                             tab.is_running = false;
+                            tab.is_loading_more = false;
                             tab.is_counting_rows = false;
                             tab.is_submitting_mutations = false;
                             tab.is_loading_full_cell = false;
-                            tab.last_status_msg = format!("Error: {msg}");
+                            if was_loading_more {
+                                tab.scroll_fetch_failed = true;
+                            } else {
+                                tab.last_status_msg = format!("Error: {msg}");
+                            }
                         }
                     }
                     self.after_save_action = None;
@@ -160,19 +173,41 @@ impl CottonDataApp {
                     let mut preload_fk_target: Option<(String, String)> = None;
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_running = false;
+                        tab.is_loading_more = false;
+                        tab.scroll_fetch_failed = false;
                         tab.mutator.revert_all();
                         tab.inline_editor = None;
                         tab.selected_cell = None;
                         match outcome {
-                            QueryOutcome::Rows(page) => {
+                            QueryOutcome::Rows(mut page) => {
+                                page.shrink_to_fit();
                                 if let Some((s, t)) = &tab.bound_table {
                                     preload_fk_target = Some((s.clone(), t.clone()));
-                                } else if let Some(first) = page.columns.iter().find(|c| c.table.is_some()) {
-                                    if let (Some(t), Some(s)) = (
-                                        first.table.clone(),
-                                        first.schema.clone().or_else(|| cur_schema.clone()),
-                                    ) {
-                                        preload_fk_target = Some((s, t));
+                                    if tab.loaded_keyset_order.is_none() {
+                                        if let Some((order_col, order_dir)) = &tab.filter_sort.order_by {
+                                            let pk_cols: Vec<&str> = page
+                                                .columns
+                                                .iter()
+                                                .filter(|c| c.is_primary_key)
+                                                .map(|c| c.sql_column_name())
+                                                .collect();
+                                            if pk_cols.len() == 1 && pk_cols[0].eq_ignore_ascii_case(order_col) {
+                                                tab.loaded_keyset_order = Some((order_col.clone(), *order_dir));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    if tab.console_sort.is_none() {
+                                        tab.console_base_sql = Some(page.executed_sql.clone());
+                                    }
+                                    tab.console_sorted_indices = None;
+                                    if let Some(first) = page.columns.iter().find(|c| c.table.is_some()) {
+                                        if let (Some(t), Some(s)) = (
+                                            first.table.clone(),
+                                            first.schema.clone().or_else(|| cur_schema.clone()),
+                                        ) {
+                                            preload_fk_target = Some((s, t));
+                                        }
                                     }
                                 }
                                 let bytes = page.approx_bytes();
@@ -194,30 +229,40 @@ impl CottonDataApp {
                                 );
                                 let evicted = self.memory_budget.record_allocation(format!("tab-{}", tab.id), bytes);
                                 let status_msg = tab.last_status_msg.clone();
+                                let batch_size = tab.loaded_batch_size;
+                                let keyset_order = tab.loaded_keyset_order.clone();
+                                let page_arc = Arc::new(page);
                                 if tab.result_sets.len() > 1 && tab.active_result_idx < tab.result_sets.len() {
                                     let idx = tab.active_result_idx;
                                     tab.result_sets[idx] = StoredResultSet {
-                                        label: result_set_label(&page, idx),
-                                        page: page.clone(),
+                                        label: result_set_label(&page_arc, idx),
+                                        page: Arc::clone(&page_arc),
                                         status_msg,
                                         mutator: StagedMutator::new(),
                                         column_widths: Vec::new(),
                                         selected_cell: None,
                                         row_selection: RowSelection::default(),
+                                        batch_size,
+                                        keyset_order,
+                                        scroll_fetch_failed: false,
                                     };
                                 } else {
                                     tab.result_sets = vec![StoredResultSet {
-                                        label: result_set_label(&page, 0),
-                                        page: page.clone(),
+                                        label: result_set_label(&page_arc, 0),
+                                        page: Arc::clone(&page_arc),
                                         status_msg,
                                         mutator: StagedMutator::new(),
                                         column_widths: Vec::new(),
                                         selected_cell: None,
                                         row_selection: RowSelection::default(),
+                                        batch_size,
+                                        keyset_order,
+                                        scroll_fetch_failed: false,
                                     }];
                                     tab.active_result_idx = 0;
                                 }
-                                tab.page = Some(page);
+                                tab.page = Some(page_arc);
+                                tab.bump_page_generation();
                                 tab.column_widths.clear();
                                 tab.row_selection.clear();
                                 tab.record_view = None;
@@ -248,6 +293,114 @@ impl CottonDataApp {
                         }
                     }
                     self.bottom_tab = BottomDeckTab::DataGrid;
+                }
+                WorkerEvent::MoreRowsLoaded {
+                    slot,
+                    tab_id,
+                    outcome,
+                    runtime,
+                } => {
+                    if let Some(s) = self.registry.get_mut(slot) {
+                        s.runtime = Some(runtime);
+                    }
+                    let mut append_error: Option<String> = None;
+                    let mut budget_update: Option<(String, usize)> = None;
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.is_loading_more = false;
+                        if let QueryOutcome::Rows(next_page) = outcome {
+                            if let Some(mut page_arc) = tab.page.take() {
+                                let shared_with_rs = tab
+                                    .result_sets
+                                    .get(tab.active_result_idx)
+                                    .is_some_and(|rs| Arc::ptr_eq(&rs.page, &page_arc));
+                                if shared_with_rs {
+                                    if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                        rs.page = Arc::new(ColumnarPage::new(Vec::new(), String::new()));
+                                    }
+                                }
+                                let page = Arc::make_mut(&mut page_arc);
+                                match page.append_page(&next_page) {
+                                    Ok(added) => {
+                                        if added == 0 {
+                                            page.has_more_rows = false;
+                                        }
+                                        page.shrink_to_fit();
+                                        let bytes = page.approx_bytes();
+                                        let more = if page.has_more_rows { "+" } else { "" };
+                                        let mode = if tab.loaded_keyset_order.is_some() {
+                                            " · keyset"
+                                        } else {
+                                            ""
+                                        };
+                                        tab.last_status_msg = format!(
+                                            "{}{} rows · {} cols · +{} in {} ms · {:.1} KiB{}",
+                                            page.row_count,
+                                            more,
+                                            page.columns.len(),
+                                            added,
+                                            page.elapsed_ms,
+                                            bytes as f64 / 1024.0,
+                                            mode
+                                        );
+                                        if tab.console_sorted_indices.is_some() {
+                                            if let Some((col_idx, _, dir)) = tab.console_sort {
+                                                tab.console_sorted_indices =
+                                                    Some(page.sorted_row_indices(col_idx, dir));
+                                            }
+                                        }
+                                        let label = result_set_label(page, tab.active_result_idx);
+                                        if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                            rs.label = label;
+                                            rs.page = Arc::clone(&page_arc);
+                                            rs.status_msg = tab.last_status_msg.clone();
+                                            rs.scroll_fetch_failed = tab.scroll_fetch_failed;
+                                        }
+                                        tab.page = Some(page_arc);
+                                        tab.bump_page_generation();
+                                        budget_update = Some((format!("tab-{}", tab.id), bytes));
+                                    }
+                                    Err(err) => {
+                                        tab.scroll_fetch_failed = true;
+                                        page.has_more_rows = false;
+                                        if shared_with_rs {
+                                            if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                                rs.page = Arc::clone(&page_arc);
+                                            }
+                                        }
+                                        tab.page = Some(page_arc);
+                                        append_error = Some(err.to_string());
+                                    }
+                                }
+                            }
+                        } else {
+                            tab.scroll_fetch_failed = true;
+                            if let Some(mut page_arc) = tab.page.take() {
+                                let shared_with_rs = tab
+                                    .result_sets
+                                    .get(tab.active_result_idx)
+                                    .is_some_and(|rs| Arc::ptr_eq(&rs.page, &page_arc));
+                                if shared_with_rs {
+                                    if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                        rs.page = Arc::new(ColumnarPage::new(Vec::new(), String::new()));
+                                    }
+                                }
+                                Arc::make_mut(&mut page_arc).has_more_rows = false;
+                                if shared_with_rs {
+                                    if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                        rs.page = Arc::clone(&page_arc);
+                                    }
+                                }
+                                tab.page = Some(page_arc);
+                            }
+                        }
+                    }
+                    if let Some((key, bytes)) = budget_update {
+                        let evicted = self.memory_budget.record_allocation(key, bytes);
+                        self.evict_pages(&evicted);
+                    }
+                    if let Some(err) = append_error {
+                        self.notify_warning(err);
+                    }
                 }
                 WorkerEvent::ScriptFinished {
                     slot,
@@ -284,7 +437,8 @@ impl CottonDataApp {
                         let mut total_ms = 0u64;
                         for outcome in outcomes {
                             match outcome {
-                                QueryOutcome::Rows(page) => {
+                                QueryOutcome::Rows(mut page) => {
+                                    page.shrink_to_fit();
                                     let bytes = page.approx_bytes();
                                     total_bytes += bytes;
                                     total_ms += page.elapsed_ms;
@@ -305,14 +459,18 @@ impl CottonDataApp {
                                         true,
                                     );
                                     let idx = stored_sets.len();
+                                    let label = result_set_label(&page, idx);
                                     stored_sets.push(StoredResultSet {
-                                        label: result_set_label(&page, idx),
-                                        page,
+                                        label,
+                                        page: Arc::new(page),
                                         status_msg,
                                         mutator: StagedMutator::new(),
                                         column_widths: Vec::new(),
                                         selected_cell: None,
                                         row_selection: RowSelection::default(),
+                                        batch_size: tab.loaded_batch_size,
+                                        keyset_order: None,
+                                        scroll_fetch_failed: false,
                                     });
                                 }
                                 QueryOutcome::Affected {
@@ -359,8 +517,23 @@ impl CottonDataApp {
                 WorkerEvent::RowCountLoaded { tab_id, total_rows } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_counting_rows = false;
-                        if let Some(page) = tab.page.as_mut() {
-                            page.total_rows_known = Some(total_rows);
+                        if let Some(mut page_arc) = tab.page.take() {
+                            let shared_with_rs = tab
+                                .result_sets
+                                .get(tab.active_result_idx)
+                                .is_some_and(|rs| Arc::ptr_eq(&rs.page, &page_arc));
+                            if shared_with_rs {
+                                if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                    rs.page = Arc::new(ColumnarPage::new(Vec::new(), String::new()));
+                                }
+                            }
+                            Arc::make_mut(&mut page_arc).total_rows_known = Some(total_rows);
+                            if shared_with_rs {
+                                if let Some(rs) = tab.result_sets.get_mut(tab.active_result_idx) {
+                                    rs.page = Arc::clone(&page_arc);
+                                }
+                            }
+                            tab.page = Some(page_arc);
                         }
                     }
                 }
@@ -371,8 +544,14 @@ impl CottonDataApp {
                     elapsed_ms,
                 } => {
                     self.notify_success(format!("Saved {statement_count} SQL mutation(s) in {elapsed_ms} ms"));
-                    let max_rows = self.registry.get(slot).map(|s| s.profile.page_size).unwrap_or(500);
+                    let max_rows = self
+                        .registry
+                        .get(slot)
+                        .map(|s| s.profile.page_size)
+                        .unwrap_or(cottondata_core::DEFAULT_PAGE_SIZE);
                     let pending_after = self.after_save_action.take();
+                    let mut reload_table_after_save = None;
+                    let mut reload_sql_after_save = None;
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.is_submitting_mutations = false;
                         tab.mutator.revert_all();
@@ -380,15 +559,9 @@ impl CottonDataApp {
                         if pending_after.is_none() {
                             if let Some((schema, table)) = tab.bound_table.clone() {
                                 tab.is_running = true;
-                                self.hub.send(
-                                    slot,
-                                    SlotCmd::LoadTablePage {
-                                        tab_id,
-                                        schema,
-                                        table,
-                                        filter_sort: tab.filter_sort.clone(),
-                                    },
-                                );
+                                tab.is_loading_more = false;
+                                tab.scroll_fetch_failed = false;
+                                reload_table_after_save = Some((schema, table, tab.filter_sort.clone()));
                             } else if let Some(executed_sql) = tab
                                 .page
                                 .as_ref()
@@ -396,16 +569,46 @@ impl CottonDataApp {
                                 .filter(|sql| !sql.trim().is_empty())
                             {
                                 tab.is_running = true;
-                                self.hub.send(
-                                    slot,
-                                    SlotCmd::ExecuteSql {
-                                        tab_id,
-                                        sql: executed_sql,
-                                        max_rows,
-                                    },
-                                );
+                                tab.is_loading_more = false;
+                                tab.scroll_fetch_failed = false;
+                                let limit = tab.row_limit.unwrap_or(max_rows);
+                                let effective_limit = if limit != cottondata_core::UNLIMITED_ROWS
+                                    && cottondata_sql::has_explicit_row_limit(&executed_sql)
+                                {
+                                    cottondata_core::UNLIMITED_ROWS
+                                } else {
+                                    limit
+                                };
+                                reload_sql_after_save = Some((executed_sql, effective_limit));
                             }
                         }
+                    }
+                    if let Some((schema, table, filter_sort)) = reload_table_after_save {
+                        let default_order_column = if filter_sort.order_by.is_none() {
+                            self.single_pk_for_table(slot, &schema, &table)
+                        } else {
+                            None
+                        };
+                        self.hub.send(
+                            slot,
+                            SlotCmd::LoadTablePage {
+                                tab_id,
+                                schema,
+                                table,
+                                filter_sort,
+                                default_order_column,
+                                keyset_seek: None,
+                            },
+                        );
+                    } else if let Some((sql, limit)) = reload_sql_after_save {
+                        self.hub.send(
+                            slot,
+                            SlotCmd::ExecuteSql {
+                                tab_id,
+                                sql,
+                                max_rows: limit,
+                            },
+                        );
                     }
                     if let Some(action) = pending_after {
                         self.execute_pending_discard_action(action);
@@ -579,6 +782,77 @@ impl CottonDataApp {
                         }
                     }
                 }
+                WorkerEvent::UpdateCheckFinished(result) => {
+                    let was_silent = self.silent_update_check && !self.update_modal.open;
+                    self.silent_update_check = false;
+                    match result {
+                        Ok(info) if info.is_newer => {
+                            self.update_modal.status = UpdateStatus::Available(info);
+                        }
+                        Ok(_) => {
+                            if was_silent {
+                                self.update_modal.status = UpdateStatus::Idle;
+                            } else {
+                                self.update_modal.status = UpdateStatus::UpToDate {
+                                    checked_at: "Just now".to_string(),
+                                };
+                            }
+                        }
+                        Err(err) => {
+                            if was_silent {
+                                self.update_modal.status = UpdateStatus::Idle;
+                            } else {
+                                self.update_modal.status = UpdateStatus::Failed(err);
+                            }
+                        }
+                    }
+                }
+                WorkerEvent::UpdateProgress { downloaded, total } => {
+                    if let UpdateStatus::Downloading {
+                        downloaded: cur,
+                        total: tot,
+                        ..
+                    } = &mut self.update_modal.status
+                    {
+                        *cur = downloaded;
+                        *tot = total;
+                    }
+                }
+                WorkerEvent::UpdateReady { info, file_path } => {
+                    self.update_modal.status = UpdateStatus::Applying(info.clone());
+                    match crate::updater::apply_update_and_relaunch(&file_path, &info) {
+                        Ok(ApplyOutcome::Relaunching) => {
+                            self.persist_sessions_now();
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Ok(ApplyOutcome::DownloadedPackage {
+                            path,
+                            install_command,
+                        }) => {
+                            self.update_modal.status = UpdateStatus::DownloadedPackage {
+                                path,
+                                install_command,
+                            };
+                        }
+                        Err(err) => {
+                            self.update_modal.status = UpdateStatus::Failed(err);
+                        }
+                    }
+                }
+                WorkerEvent::UpdateFailed(err) => {
+                    if self.update_modal.cancel_flag.load(Ordering::Relaxed) {
+                        let prev_info = match &self.update_modal.status {
+                            UpdateStatus::Downloading { info, .. } => Some(info.clone()),
+                            _ => None,
+                        };
+                        self.update_modal.status = match prev_info {
+                            Some(info) => UpdateStatus::Available(info),
+                            None => UpdateStatus::Idle,
+                        };
+                    } else {
+                        self.update_modal.status = UpdateStatus::Failed(err);
+                    }
+                }
             }
         }
     }
@@ -593,6 +867,10 @@ impl CottonDataApp {
     }
 
     fn evict_pages(&mut self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        let mut evicted_any = false;
         for key in keys {
             if let Some(id_str) = key.strip_prefix("tab-") {
                 if let Ok(tid) = id_str.parse::<u64>() {
@@ -600,11 +878,17 @@ impl CottonDataApp {
                         tab.page = None;
                         tab.result_sets.clear();
                         tab.active_result_idx = 0;
+                        tab.reset_console_sort();
+                        tab.bump_page_generation();
                         tab.last_status_msg =
-                            "Page evicted by the 32 MiB RAM budget. Run or reload to fetch it again".into();
+                            "Page evicted by the 16 MiB RAM budget. Run or reload to fetch it again".into();
+                        evicted_any = true;
                     }
                 }
             }
+        }
+        if evicted_any {
+            crate::purge_unused_memory();
         }
     }
 }

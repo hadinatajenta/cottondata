@@ -17,4 +17,6 @@ pub use import::{
     ImportFormat, ImportPreview, TargetColumnSpec,
 };
 pub use mutator::{build_row_key_predicate, MutationKind, PendingSqlBatch, StagedMutator};
-pub use page::{CellValue, ColumnMeta, ColumnarPage, PageFilterSort, SortDirection};
+pub use page::{
+    format_keyset_literal, CellValue, ColumnMeta, ColumnarPage, KeysetSeek, PageFilterSort, SortDirection,
+};

@@ -1,5 +1,7 @@
 #define MyAppName "CottonData"
-#define MyAppVersion "0.10.0"
+#ifndef MyAppVersion
+#define MyAppVersion "0.11.0"
+#endif
 #define MyAppPublisher "Hadinata"
 #define MyAppURL "https://github.com/hadinatajenta/cottondata"
 #define MyAppExeName "CottonData.exe"
@@ -21,6 +23,8 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
+CloseApplications=yes
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -39,4 +43,4 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall

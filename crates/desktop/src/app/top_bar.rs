@@ -1,11 +1,12 @@
 use super::server_form::ServerModalState;
 use super::sessions::SessionModalState;
+use super::update_modal::UpdateStatus;
 use super::CottonDataApp;
 use crate::theme::{AppTheme, Palette, GUTTER};
 use crate::ui_kit::{card_frame, ghost_button, icon, icon_button, icon_text, pill, primary_button, toolbar_divider};
 use crate::worker::SlotCmd;
 use cottondata_core::ServerSlotId;
-use eframe::egui::{self, Color32, Margin, RichText};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 
 const LABELED_TOOLBAR_MIN_WIDTH: f32 = 1480.0;
 const ADD_SERVER_LABEL_MIN_WIDTH: f32 = 1180.0;
@@ -112,6 +113,19 @@ impl CottonDataApp {
         {
             self.open_console_tab();
         }
+        let switcher_hint = if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl+K" };
+        let switcher_label = if layout.show_brand_text { switcher_hint } else { "" };
+        let switcher_tooltip = if cfg!(target_os = "macos") {
+            "Quick Switcher (⌘K)"
+        } else {
+            "Quick Switcher (Ctrl+K)"
+        };
+        if ghost_button(ui, palette, icon::MAGNIFYING_GLASS, switcher_label, true)
+            .on_hover_text(switcher_tooltip)
+            .clicked()
+        {
+            self.open_quick_switcher();
+        }
     }
 
     fn render_session_picker(&mut self, ui: &mut egui::Ui, palette: Palette, combo_w: f32) {
@@ -179,6 +193,7 @@ impl CottonDataApp {
         if icon_button(ui, palette, icon::GEAR_SIX, "Settings").clicked() {
             self.open_settings();
         }
+        self.render_update_button(ui, palette);
         toolbar_divider(ui, palette);
 
         self.render_schema_picker(ui, palette, layout.schema_combo_w);
@@ -186,16 +201,48 @@ impl CottonDataApp {
         self.render_server_badges(ui, palette);
     }
 
+    fn render_update_button(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        let pill_label = match &self.update_modal.status {
+            UpdateStatus::Available(info) => Some(format!("Update v{}", info.version)),
+            UpdateStatus::Downloading { .. } | UpdateStatus::Applying(_) => Some("Updating…".to_string()),
+            _ => None,
+        };
+        if let Some(label) = pill_label {
+            let text = icon_text(icon::ARROW_CIRCLE_UP, palette.accent, &label, palette.accent, 12.0);
+            let button = egui::Button::new(text)
+                .fill(palette.accent.gamma_multiply(0.14))
+                .stroke(Stroke::new(1.0, palette.accent.gamma_multiply(0.55)))
+                .corner_radius(CornerRadius::same(255));
+            if ui
+                .add(button)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Open software update dialog")
+                .clicked()
+            {
+                self.open_update_modal();
+            }
+        } else if icon_button(ui, palette, icon::ARROW_CIRCLE_UP, "Check for updates").clicked() {
+            self.open_update_modal();
+        }
+    }
+
     fn render_server_picker(&mut self, ui: &mut egui::Ui, palette: Palette, combo_w: f32) {
         let selected_label = self
             .active_slot
-            .and_then(|slot_id| self.registry.get(slot_id))
-            .map(|slot| format!("{} {}", slot.slot_id, slot.profile.name))
+            .and_then(|slot_id| {
+                let slot = self.registry.get(slot_id)?;
+                let display_num = self
+                    .registry
+                    .display_number_of(slot_id)
+                    .unwrap_or_else(|| slot_id.display_number());
+                Some(format!("#{display_num} {}", slot.profile.name))
+            })
             .unwrap_or_else(|| "No server".into());
         let server_options: Vec<(ServerSlotId, String)> = self
             .registry
             .iter()
-            .map(|slot| (slot.slot_id, format!("{} {}", slot.slot_id, slot.profile.name)))
+            .enumerate()
+            .map(|(idx, slot)| (slot.slot_id, format!("#{} {}", idx + 1, slot.profile.name)))
             .collect();
 
         let mut chosen_slot = self.active_slot;
@@ -275,10 +322,10 @@ impl CottonDataApp {
         if slot.profile.read_only {
             pill(ui, "READ-ONLY", palette.warning);
         }
-        let [red, green, blue] = slot.profile.environment.rgb();
+        let [red, green, blue] = slot.profile.env_display_rgb();
         pill(
             ui,
-            slot.profile.environment.label(),
+            slot.profile.env_display_label(),
             Color32::from_rgb(red, green, blue),
         );
         if slot.runtime.is_none() {

@@ -19,7 +19,15 @@ pub(super) enum ServerAction {
     NewConsole(ServerSlotId),
     Edit(ServerSlotId),
     Duplicate(ServerSlotId),
+    MoveUp(ServerSlotId),
+    MoveDown(ServerSlotId),
     Remove(ServerSlotId),
+}
+
+struct ServerRowMetrics {
+    slot_id: ServerSlotId,
+    header_rect: egui::Rect,
+    block_bottom: f32,
 }
 
 impl CottonDataApp {
@@ -173,24 +181,44 @@ impl CottonDataApp {
 
         let filter = self.explorer_filter.trim().to_ascii_lowercase();
         let slot_ids: Vec<ServerSlotId> = self.registry.iter().map(|slot| slot.slot_id).collect();
+        let can_reorder = filter.is_empty() && slot_ids.len() > 1;
+        if !can_reorder {
+            self.dragging_server = None;
+        }
+        if self.dragging_server.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.dragging_server = None;
+        }
+        if self.dragging_server.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+
         let mut pending_server_action = None;
         let mut pending_nav = Vec::new();
+        let mut started_drag: Option<ServerSlotId> = None;
+        let mut row_metrics: Vec<ServerRowMetrics> = Vec::with_capacity(slot_ids.len());
+        let active_drag = self.dragging_server;
 
         let scroll_max_w = ui.available_width();
-        egui::ScrollArea::vertical()
+        let scroll_out = egui::ScrollArea::vertical()
             .id_salt("unified_explorer_scroll")
             .max_width(scroll_max_w)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_max_width(scroll_max_w);
-                for slot_id in slot_ids {
+                let total_slots = slot_ids.len();
+                for (display_idx, slot_id) in slot_ids.iter().copied().enumerate() {
                     let Some(slot) = self.registry.get(slot_id) else {
                         continue;
                     };
                     if !filter.is_empty() && !self.server_matches_filter(slot, &filter) {
                         continue;
                     }
+                    let display_number = self
+                        .registry
+                        .display_number_of(slot_id)
+                        .unwrap_or(display_idx + 1);
                     let is_selected = self.active_slot == Some(slot_id);
+                    let is_being_dragged = active_drag == Some(slot_id);
                     let is_connected = matches!(slot.status, ConnectionStatus::Connected);
                     let is_connecting = matches!(slot.status, ConnectionStatus::Connecting);
                     let node_id = ui.make_persistent_id(("explorer_server", slot_id.index()));
@@ -199,8 +227,20 @@ impl CottonDataApp {
                         state.set_open(true);
                     }
 
-                    let (header_resp, row_action) =
-                        render_server_tree_header(ui, palette, slot, is_selected, &mut state);
+                    let row_ctx = ServerRowRenderContext {
+                        display_number,
+                        is_selected,
+                        can_reorder,
+                        can_move_up: display_idx > 0,
+                        can_move_down: display_idx + 1 < total_slots,
+                        is_being_dragged,
+                        any_dragging: active_drag.is_some(),
+                    };
+                    let (header_resp, row_action, drag_triggered) =
+                        render_server_tree_header(ui, palette, slot, row_ctx, &mut state);
+                    if drag_triggered {
+                        started_drag = Some(slot_id);
+                    }
                     if let Some(act) = row_action {
                         pending_server_action = Some(act);
                     }
@@ -239,9 +279,103 @@ impl CottonDataApp {
                             }
                         }
                     });
+                    let block_bottom = ui.cursor().top().max(header_resp.rect.bottom());
+                    row_metrics.push(ServerRowMetrics {
+                        slot_id,
+                        header_rect: header_resp.rect,
+                        block_bottom,
+                    });
                     ui.add_space(2.0);
                 }
             });
+
+        if self.dragging_server.is_none() {
+            if let Some(drag_slot) = started_drag {
+                self.dragging_server = Some(drag_slot);
+            }
+        }
+
+        if let Some(drag_slot) = self.dragging_server {
+            if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
+                if let Some(drag_idx) = row_metrics.iter().position(|row| row.slot_id == drag_slot) {
+                    let mut insert_idx = row_metrics.len();
+                    for (idx, row) in row_metrics.iter().enumerate() {
+                        if pointer_pos.y < row.header_rect.center().y {
+                            insert_idx = idx;
+                            break;
+                        }
+                    }
+
+                    let is_real_move = insert_idx != drag_idx && insert_idx != drag_idx + 1;
+                    if is_real_move {
+                        let (line_y, x_range) = if insert_idx < row_metrics.len() {
+                            let target_rect = row_metrics[insert_idx].header_rect;
+                            (target_rect.top() - 1.0, target_rect.x_range())
+                        } else {
+                            let last = row_metrics.last().expect("non-empty row metrics");
+                            (last.block_bottom + 1.0, last.header_rect.x_range())
+                        };
+                        let painter = ui.painter_at(scroll_out.inner_rect);
+                        let line_left = x_range.min + 4.0;
+                        let line_right = (x_range.max - 4.0).max(line_left);
+                        painter.hline(line_left..=line_right, line_y, Stroke::new(2.0, palette.accent));
+                        painter.circle_filled(egui::pos2(line_left, line_y), 3.0, palette.accent);
+                        painter.circle_filled(egui::pos2(line_right, line_y), 3.0, palette.accent);
+                    }
+
+                    if let Some(drag_slot_ref) = self.registry.get(drag_slot) {
+                        let [r, g, b] = drag_slot_ref.profile.env_display_rgb();
+                        let env_col = Color32::from_rgb(r, g, b);
+                        let drag_name = drag_slot_ref.profile.name.clone();
+                        let drag_env = drag_slot_ref.profile.env_display_label().to_string();
+                        egui::Area::new(egui::Id::new("server_drag_ghost"))
+                            .order(egui::Order::Tooltip)
+                            .interactable(false)
+                            .fixed_pos(pointer_pos + egui::vec2(14.0, 10.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(palette.bg_card)
+                                    .stroke(Stroke::new(1.5, palette.accent))
+                                    .corner_radius(CornerRadius::same(RADIUS_CONTROL))
+                                    .shadow(ui.ctx().style().visuals.popup_shadow)
+                                    .inner_margin(Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            status_dot(ui, env_col);
+                                            ui.label(
+                                                RichText::new(&drag_name)
+                                                    .size(12.5)
+                                                    .strong()
+                                                    .color(palette.text_primary),
+                                            );
+                                            pill(ui, &drag_env, env_col);
+                                        });
+                                    });
+                            });
+                    }
+
+                    if ui.ctx().input(|i| i.pointer.any_released()) {
+                        let final_idx = if insert_idx > drag_idx {
+                            insert_idx - 1
+                        } else {
+                            insert_idx
+                        };
+                        if self.registry.reorder(drag_slot, final_idx) {
+                            if let Err(err) = self.storage.save_registry(&self.registry) {
+                                self.notify_error(format!("Could not save server order: {err}"));
+                            }
+                            self.mark_session_dirty();
+                        }
+                        self.dragging_server = None;
+                    }
+                } else if ui.ctx().input(|i| i.pointer.any_released()) {
+                    self.dragging_server = None;
+                }
+            } else if ui.ctx().input(|i| i.pointer.any_released()) {
+                self.dragging_server = None;
+            }
+        }
 
         if let Some(action) = pending_server_action {
             self.apply_server_action(action);
@@ -297,6 +431,22 @@ impl CottonDataApp {
                     }
                 }
             }
+            ServerAction::MoveUp(slot_id) => {
+                if self.registry.move_by(slot_id, -1) {
+                    if let Err(err) = self.storage.save_registry(&self.registry) {
+                        self.notify_error(format!("Could not save server order: {err}"));
+                    }
+                    self.mark_session_dirty();
+                }
+            }
+            ServerAction::MoveDown(slot_id) => {
+                if self.registry.move_by(slot_id, 1) {
+                    if let Err(err) = self.storage.save_registry(&self.registry) {
+                        self.notify_error(format!("Could not save server order: {err}"));
+                    }
+                    self.mark_session_dirty();
+                }
+            }
             ServerAction::Remove(slot_id) => self.remove_server(slot_id),
         }
     }
@@ -318,34 +468,98 @@ impl CottonDataApp {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ServerRowRenderContext {
+    display_number: usize,
+    is_selected: bool,
+    can_reorder: bool,
+    can_move_up: bool,
+    can_move_down: bool,
+    is_being_dragged: bool,
+    any_dragging: bool,
+}
+
+fn exceeds_drag_threshold(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    if !resp.dragged_by(egui::PointerButton::Primary) {
+        return false;
+    }
+    ui.input(|i| match (i.pointer.press_origin(), i.pointer.interact_pos()) {
+        (Some(origin), Some(pos)) => origin.distance(pos) > 4.0,
+        _ => false,
+    })
+}
+
 fn render_server_tree_header(
     ui: &mut egui::Ui,
     palette: Palette,
     slot: &ServerSlot,
-    is_selected: bool,
+    ctx: ServerRowRenderContext,
     state: &mut CollapsingState,
-) -> (egui::Response, Option<ServerAction>) {
+) -> (egui::Response, Option<ServerAction>, bool) {
     let mut action = None;
+    let mut drag_triggered = false;
     let slot_id = slot.slot_id;
-    let [red, green, blue] = slot.profile.environment.rgb();
+    let [red, green, blue] = slot.profile.env_display_rgb();
+    let env_color = if ctx.is_being_dragged {
+        Color32::from_rgb(red, green, blue).gamma_multiply(0.45)
+    } else {
+        Color32::from_rgb(red, green, blue)
+    };
     let status_color = match &slot.status {
         ConnectionStatus::Connected => palette.success,
         ConnectionStatus::Connecting => palette.warning,
         ConnectionStatus::Error(_) => palette.danger,
         ConnectionStatus::Disconnected => palette.text_muted,
     };
+    let status_color = if ctx.is_being_dragged {
+        status_color.gamma_multiply(0.45)
+    } else {
+        status_color
+    };
+    let row_fill = if ctx.is_being_dragged {
+        palette.bg_surface
+    } else if ctx.is_selected {
+        palette.accent_soft
+    } else {
+        Color32::TRANSPARENT
+    };
 
     let frame_resp = egui::Frame::new()
-        .fill(if is_selected {
-            palette.accent_soft
-        } else {
-            Color32::TRANSPARENT
-        })
+        .fill(row_fill)
         .corner_radius(CornerRadius::same(RADIUS_CONTROL))
         .inner_margin(Margin::symmetric(4, 3))
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
             ui.horizontal(|ui| {
+                if ctx.can_reorder {
+                    let (grip_rect, grip_resp) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 20.0), Sense::click_and_drag());
+                    let grip_cursor = if ctx.is_being_dragged || ctx.any_dragging {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    };
+                    let grip_resp = grip_resp
+                        .on_hover_cursor(grip_cursor)
+                        .on_hover_text("Drag to reorder server");
+                    let grip_color = if ctx.is_being_dragged {
+                        palette.accent
+                    } else if grip_resp.hovered() {
+                        palette.text_primary
+                    } else {
+                        palette.text_muted.gamma_multiply(0.55)
+                    };
+                    ui.painter().text(
+                        grip_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon::DOTS_SIX_VERTICAL,
+                        egui::FontId::proportional(13.0),
+                        grip_color,
+                    );
+                    if !ctx.any_dragging && exceeds_drag_threshold(ui, &grip_resp) {
+                        drag_triggered = true;
+                    }
+                }
                 state.show_toggle_button(ui, tree_toggle_icon);
                 if matches!(slot.status, ConnectionStatus::Connecting) {
                     ui.add(egui::Spinner::new().size(10.0).color(palette.warning));
@@ -367,41 +581,62 @@ fn render_server_tree_header(
                             }
                         }
                     }
-                    pill(
-                        ui,
-                        slot.profile.environment.label(),
-                        Color32::from_rgb(red, green, blue),
-                    );
+                    pill(ui, slot.profile.env_display_label(), env_color);
                     let remaining_w = ui.available_width().max(SERVER_TITLE_MIN_WIDTH);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.set_max_width(remaining_w);
-                        let title = format!("{} {}", slot_id, slot.profile.name);
+                        let title = format!("#{} {}", ctx.display_number, slot.profile.name);
                         let address = format!(
                             "{}@{} ({})",
                             slot.profile.username,
                             slot.profile.endpoint.display_address(),
                             slot.profile.engine.label()
                         );
+                        let icon_color = if ctx.is_being_dragged {
+                            palette.icon_schema.gamma_multiply(0.45)
+                        } else {
+                            palette.icon_schema
+                        };
+                        let text_color = if ctx.is_being_dragged {
+                            palette.text_primary.gamma_multiply(0.45)
+                        } else {
+                            palette.text_primary
+                        };
+                        let sense = if ctx.can_reorder {
+                            Sense::click_and_drag()
+                        } else {
+                            Sense::click()
+                        };
                         let label = egui::Label::new(icon_text(
                             icon::DATABASE,
-                            palette.icon_schema,
+                            icon_color,
                             &title,
-                            palette.text_primary,
+                            text_color,
                             13.0,
                         ))
                         .truncate()
-                        .sense(Sense::click());
+                        .sense(sense);
+                        let cursor = if ctx.any_dragging {
+                            egui::CursorIcon::Grabbing
+                        } else {
+                            egui::CursorIcon::PointingHand
+                        };
                         let resp = ui
                             .add(label)
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_cursor(cursor)
                             .on_hover_text(address);
-                        if resp.double_clicked() {
-                            state.toggle(ui);
-                            if matches!(slot.status, ConnectionStatus::Disconnected | ConnectionStatus::Error(_)) {
-                                action = Some(ServerAction::Connect(slot_id));
+                        if ctx.can_reorder && !ctx.any_dragging && exceeds_drag_threshold(ui, &resp) {
+                            drag_triggered = true;
+                        }
+                        if !ctx.any_dragging && !drag_triggered {
+                            if resp.double_clicked() {
+                                state.toggle(ui);
+                                if matches!(slot.status, ConnectionStatus::Disconnected | ConnectionStatus::Error(_)) {
+                                    action = Some(ServerAction::Connect(slot_id));
+                                }
+                            } else if resp.clicked() {
+                                action = Some(ServerAction::Select(slot_id));
                             }
-                        } else if resp.clicked() {
-                            action = Some(ServerAction::Select(slot_id));
                         }
                         resp.context_menu(|ui| {
                             ui.set_min_width(180.0);
@@ -425,6 +660,29 @@ fn render_server_tree_header(
                                 action = Some(ServerAction::NewConsole(slot_id));
                                 ui.close_menu();
                             }
+                            if ctx.can_reorder {
+                                ui.separator();
+                                if ui
+                                    .add_enabled(
+                                        ctx.can_move_up,
+                                        egui::Button::new(format!("{}  Move Up", icon::ARROW_UP)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(ServerAction::MoveUp(slot_id));
+                                    ui.close_menu();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        ctx.can_move_down,
+                                        egui::Button::new(format!("{}  Move Down", icon::ARROW_DOWN)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(ServerAction::MoveDown(slot_id));
+                                    ui.close_menu();
+                                }
+                            }
                             ui.separator();
                             if ui.button(format!("{}  Edit server…", icon::PENCIL_SIMPLE)).clicked() {
                                 action = Some(ServerAction::Edit(slot_id));
@@ -445,5 +703,5 @@ fn render_server_tree_header(
         })
         .response;
 
-    (frame_resp, action)
+    (frame_resp, action, drag_triggered)
 }

@@ -2,6 +2,35 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.11.0] — 2026-11-27
+
+### Added
+- **Fast Auto-Limited Queries & Infinite Scroll (`crates/sql/src/paging.rs`, `crates/grid/src/page.rs`)**:
+  - Automatic server-side row cap (`page_size = 100` by default) for unbounded `SELECT` queries across all five engines (`SET SESSION sql_select_limit` on MySQL/MariaDB, batched `SET ROWCOUNT` on SQL Server, cursor-capped reads on PostgreSQL, `LIMIT` push-down on CockroachDB, and early step termination on SQLite), with a toolbar `Limit` selector (`100`, `200`, `500`, `1,000`, `5,000`, `Unlimited`).
+  - Automatic infinite-scroll continuation (`FetchMoreRows` + `ColumnarPage::append_page`) and $O(1)$ keyset seek pagination for single-PK Table Tabs.
+- **Click-to-Sort Column Headers (`DESC → ASC → Default`)**:
+  - Click any column header in both **Table Tabs** and **SQL Console** results to cycle `DESC → ASC → Default`, with right-pinned sort icons (`SORT_DESCENDING` / `SORT_ASCENDING`, hover `ARROWS_DOWN_UP`) that never clip behind `…`.
+  - Instant zero-copy in-memory sorting when all rows are loaded, and automatic server-side `ORDER BY` + continuation across all five dialects when more rows exist on the server.
+  - Column header right-click context menu (*Sort Descending*, *Sort Ascending*, *Clear Sort*, *Auto-fit all columns*, *Reset column widths*).
+- **Drag-and-Drop Server Reordering in Database Explorer**:
+  - Drag servers with the grip handle (with ghost pill, 2px insertion indicator, `Esc` cancel, and *Move Up / Move Down* context menu actions) backed by a decoupled display order in `ServerRegistry` so live connections remain uninterrupted and `#1..#N` / `Cmd+1..0` shortcuts stay in sync.
+- **Custom Environment Labels & Colors**:
+  - Choose **CUSTOM** in the connection dialog to define any environment label (up to 24 characters), pick from 8 high-contrast color swatches with live badge preview, and toggle the **Production safety guard** (backward-compatible with existing `servers.json`).
+- **Cross-Platform In-App Self-Updater (`crates/desktop/src/updater.rs`, `.github/workflows/release.yml`)**:
+  - Top-bar update button, Settings *Updates* section (with startup auto-check toggle), and modal progress viewer powered by pure-Rust `ureq` + mandatory `SHA256SUMS.txt` verification.
+  - Automated install & relaunch on **macOS** (`.app` atomic swap + `codesign --verify` + LaunchServices refresh), **Windows** (Inno Setup `/SILENT` upgrade & Portable zip atomic swap), and **Linux** (writable tarball atomic swap & `.deb` handoff), paired with a multi-OS GitHub Actions release workflow.
+- **Grid & Navigation Ergonomics**:
+  - `Cmd/Ctrl+K` Quick Switcher across servers, schemas, and tables.
+  - `Cmd/Ctrl+Shift+F` instant in-memory row filter bar (`matched/total rows`).
+  - `Cmd/Ctrl+C` copy cell or selected rows as TSV, `Cmd/Ctrl+R` refresh, instant `~row_estimate` on the Count rows button, and hover pretty-preview tooltips for long text and JSON cells.
+
+### Changed
+- **New App Icon**: refreshed application icon across macOS (`.icns`), Windows (`.ico`), and Linux (`.png`).
+- **Aggressive RAM & Binary Size Optimizations**:
+  - Single-owner `Arc<ColumnarPage>` (eliminates 2× result grid copy) + `shrink_to_fit()`, 16 MiB default grid memory budget with cleanup on tab close, 64-entry LRU cap on DDL `table_details`, `Arc<SchemaCatalog>` without deep snapshots, worker thread & Tokio runtime teardown on Disconnect, and immediate `mi_collect(true)` OS page reclamation.
+  - Zero-clone MySQL row decoding, cached SQL syntax highlighting (`Arc<Galley>`) and search match caching, zero-alloc `Cow<'_, str>` cell rendering fast path, and precomputed outbound FK column flags.
+  - Removed unused `eframe/default_fonts`, subsetted Phosphor icons (477 KB → 23.4 KB), switched macOS fallback icon to 256px, and enabled `opt-level = "z"` + `lto = "fat"` — shrinking the macOS bundle from **17 MB → 11 MB** (`CottonData-macos-arm64.zip` **8.9 MB → 6.2 MB**).
+
 ## [0.10.0] — 2026-11-26
 
 ### Added

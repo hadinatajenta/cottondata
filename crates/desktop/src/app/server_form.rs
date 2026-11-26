@@ -1,6 +1,18 @@
 use cottondata_core::{
     ConnectionEndpoint, DatabaseEngine, EnvironmentTag, ServerProfile, ServerSlotId, SshTunnelConfig, TlsMode,
+    MAX_ENVIRONMENT_LABEL_CHARS,
 };
+
+pub(super) const ENV_COLOR_SWATCHES: &[(&str, [u8; 3])] = &[
+    ("Crimson", [239, 68, 68]),
+    ("Amber", [245, 158, 11]),
+    ("Emerald", [34, 197, 94]),
+    ("Sky", [56, 189, 248]),
+    ("Indigo", [99, 102, 241]),
+    ("Violet", [168, 85, 247]),
+    ("Rose", [244, 114, 182]),
+    ("Slate", [148, 163, 184]),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerFormTab {
@@ -38,6 +50,10 @@ pub(super) struct ServerModalState {
     pub(super) ssh_user: String,
     pub(super) ssh_key: String,
     pub(super) environment: EnvironmentTag,
+    pub(super) custom_env_mode: bool,
+    pub(super) environment_label: String,
+    pub(super) environment_color: [u8; 3],
+    pub(super) production_guard: bool,
     pub(super) read_only: bool,
     pub(super) page_size: u32,
     pub(super) error_msg: Option<String>,
@@ -71,8 +87,12 @@ impl ServerModalState {
             ssh_user: String::new(),
             ssh_key: String::new(),
             environment: EnvironmentTag::Local,
+            custom_env_mode: false,
+            environment_label: String::new(),
+            environment_color: ENV_COLOR_SWATCHES[4].1,
+            production_guard: false,
             read_only: false,
-            page_size: 500,
+            page_size: cottondata_core::DEFAULT_PAGE_SIZE,
             error_msg: None,
             active_tab: ServerFormTab::General,
             show_password: false,
@@ -119,6 +139,10 @@ impl ServerModalState {
             ssh_user: p.ssh.username.clone(),
             ssh_key: p.ssh.identity_file.clone().unwrap_or_default(),
             environment: p.environment,
+            custom_env_mode: p.has_custom_environment(),
+            environment_label: p.environment_label.clone().unwrap_or_default(),
+            environment_color: p.env_display_rgb(),
+            production_guard: p.is_production(),
             read_only: p.read_only,
             page_size: p.page_size,
             error_msg: None,
@@ -127,6 +151,27 @@ impl ServerModalState {
             show_uri_bar: false,
             uri_input: String::new(),
             test_state: ConnectionTestState::Idle,
+        }
+    }
+
+    pub(super) fn preview_rgb(&self) -> [u8; 3] {
+        if self.custom_env_mode {
+            self.environment_color
+        } else {
+            self.environment.rgb()
+        }
+    }
+
+    pub(super) fn preview_label(&self) -> &str {
+        if self.custom_env_mode {
+            let trimmed = self.environment_label.trim();
+            if trimmed.is_empty() {
+                "CUSTOM"
+            } else {
+                trimmed
+            }
+        } else {
+            self.environment.label()
         }
     }
 
@@ -393,6 +438,26 @@ impl ServerModalState {
             )
         });
 
+        let (environment, environment_label, environment_color) = if self.custom_env_mode {
+            let trimmed = self.environment_label.trim();
+            if trimmed.is_empty() {
+                return Err("Custom environment label cannot be empty".to_string());
+            }
+            if trimmed.chars().count() > MAX_ENVIRONMENT_LABEL_CHARS {
+                return Err(format!(
+                    "Environment label must be at most {MAX_ENVIRONMENT_LABEL_CHARS} characters"
+                ));
+            }
+            let tag = if self.production_guard {
+                EnvironmentTag::Production
+            } else {
+                EnvironmentTag::Development
+            };
+            (tag, Some(trimmed.to_string()), Some(self.environment_color))
+        } else {
+            (self.environment, None, None)
+        };
+
         let profile = ServerProfile {
             id,
             engine: self.engine,
@@ -431,7 +496,9 @@ impl ServerModalState {
                 },
                 local_bind_port: None,
             },
-            environment: self.environment,
+            environment,
+            environment_label,
+            environment_color,
             read_only: self.read_only,
             page_size: self.page_size,
             connect_timeout_secs: 10,
@@ -736,5 +803,59 @@ mod tests {
         assert_eq!(form.port, "26257");
         assert_eq!(form.username, "root");
         assert!(!form.use_unix_socket);
+    }
+
+    #[test]
+    fn custom_environment_validates_builds_and_preserves_across_edit_and_duplicate() {
+        let mut form = ServerModalState::new_empty();
+        form.name = "EU QA Cluster".into();
+        form.custom_env_mode = true;
+        form.environment_label = "   ".into();
+        form.environment_color = ENV_COLOR_SWATCHES[5].1;
+        assert_eq!(form.preview_label(), "CUSTOM");
+        assert_eq!(form.preview_rgb(), ENV_COLOR_SWATCHES[5].1);
+        assert!(form.build_profile(None).is_err());
+
+        form.environment_label = "x".repeat(MAX_ENVIRONMENT_LABEL_CHARS + 1);
+        assert!(form.build_profile(None).is_err());
+
+        form.environment_label = "  EU-West QA  ".into();
+        form.production_guard = false;
+        assert_eq!(form.preview_label(), "EU-West QA");
+        let qa_profile = form.build_profile(None).expect("valid custom env");
+        assert_eq!(qa_profile.environment, EnvironmentTag::Development);
+        assert_eq!(qa_profile.environment_label.as_deref(), Some("EU-West QA"));
+        assert_eq!(qa_profile.environment_color, Some(ENV_COLOR_SWATCHES[5].1));
+        assert!(!qa_profile.is_production());
+
+        form.production_guard = true;
+        let dr_profile = form.build_profile(None).expect("valid custom prod env");
+        assert_eq!(dr_profile.environment, EnvironmentTag::Production);
+        assert!(dr_profile.is_production());
+        assert!(dr_profile.has_custom_environment());
+
+        let slot = ServerSlotId::new(0).unwrap();
+        let edited = ServerModalState::from_existing(slot, &dr_profile, None);
+        assert!(edited.custom_env_mode);
+        assert_eq!(edited.environment_label, "EU-West QA");
+        assert_eq!(edited.environment_color, ENV_COLOR_SWATCHES[5].1);
+        assert!(edited.production_guard);
+
+        let duplicated = ServerModalState::from_duplicate(&dr_profile, None);
+        assert_eq!(duplicated.editing_slot, None);
+        assert!(duplicated.custom_env_mode);
+        assert_eq!(duplicated.environment_label, "EU-West QA");
+        assert_eq!(duplicated.environment_color, ENV_COLOR_SWATCHES[5].1);
+        assert!(duplicated.production_guard);
+
+        let mut preset = edited;
+        preset.custom_env_mode = false;
+        preset.environment = EnvironmentTag::Staging;
+        assert_eq!(preset.preview_label(), "STAGING");
+        assert_eq!(preset.preview_rgb(), EnvironmentTag::Staging.rgb());
+        let preset_profile = preset.build_profile(None).expect("valid preset");
+        assert_eq!(preset_profile.environment, EnvironmentTag::Staging);
+        assert_eq!(preset_profile.environment_label, None);
+        assert_eq!(preset_profile.environment_color, None);
     }
 }

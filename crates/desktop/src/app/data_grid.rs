@@ -1,12 +1,11 @@
-use super::query_tab::RecordViewState;
+use super::query_tab::{limit_label, RecordViewState, TABLE_PAGE_SIZE_PRESETS};
 use super::{ActiveStreamExport, CottonDataApp, PendingDiscardAction};
 use crate::theme::Palette;
 use crate::ui_kit::{
-    busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_text, pill, primary_button,
-    tinted_ghost_button, toolbar_divider,
+    busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_text, inset_frame, pill,
+    primary_button, tinted_ghost_button, toolbar_divider,
 };
 use crate::worker::SlotCmd;
-use cottondata_core::EnvironmentTag;
 use cottondata_grid::{export_rows, ExportFormat, SortDirection, SqlInsertTarget};
 use eframe::egui::{self, RichText};
 use std::fs::File;
@@ -17,6 +16,7 @@ use std::sync::Arc;
 impl CottonDataApp {
     pub(super) fn render_data_grid(&mut self, ui: &mut egui::Ui, p: Palette) {
         let mut reload_page_idx: Option<u64> = None;
+        let mut new_table_page_size: Option<u32> = None;
         let mut count_rows_req = false;
         let mut export_page_req = None;
         let mut export_stream_req = None;
@@ -26,8 +26,12 @@ impl CottonDataApp {
         let active_slot = self.tabs[self.active_tab_idx].slot.or(self.active_slot);
         let is_production = active_slot
             .and_then(|s| self.registry.get(s))
-            .is_some_and(|sl| sl.profile.environment == EnvironmentTag::Production);
+            .is_some_and(|sl| sl.profile.is_production());
         let bound_table = self.tabs[self.active_tab_idx].bound_table.clone();
+        let row_estimate = active_slot
+            .zip(bound_table.as_ref())
+            .and_then(|(slot, (schema, table))| self.cached_table_detail(slot, schema, table))
+            .and_then(|detail| detail.row_estimate);
 
         if self.tabs[self.active_tab_idx].result_sets.len() > 1 {
             let mut switch_to = None;
@@ -117,15 +121,43 @@ impl CottonDataApp {
                 {
                     reload_page_idx = Some(tab.filter_sort.page_index + 1);
                 }
-                let total_label = tab
+                let cur_page_size = tab.filter_sort.page_size.max(20);
+                egui::ComboBox::from_id_salt(("table_page_size", tab.id))
+                    .selected_text(
+                        RichText::new(format!("{} rows", limit_label(cur_page_size)))
+                            .size(11.5)
+                            .color(p.text_primary),
+                    )
+                    .width(78.0)
+                    .show_ui(ui, |ui| {
+                        for &(preset, label) in TABLE_PAGE_SIZE_PRESETS {
+                            if ui.selectable_label(cur_page_size == preset, label).clicked() {
+                                new_table_page_size = Some(preset);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Rows fetched per page / scroll batch");
+                let (total_label, total_tip) = match tab
                     .page
                     .as_ref()
                     .and_then(|pg| pg.total_rows_known)
-                    .map(|n| format!("{n} rows"))
-                    .unwrap_or_else(|| "Count rows".into());
+                {
+                    Some(n) => (format!("{n} rows"), "Exact row count — click to recount"),
+                    None => match row_estimate {
+                        Some(est) => (
+                            format!("~{} rows · Exact", format_compact_count(est)),
+                            "Estimated from table metadata — click to run exact COUNT(*)",
+                        ),
+                        None => ("Count rows".into(), "Run exact COUNT(*) for this table"),
+                    },
+                };
                 if tab.is_counting_rows {
                     busy_indicator(ui, p, "Counting…");
-                } else if ghost_button(ui, p, icon::HASH, &total_label, !is_busy).clicked() {
+                } else if ghost_button(ui, p, icon::HASH, &total_label, !is_busy)
+                    .on_hover_text(total_tip)
+                    .clicked()
+                {
                     count_rows_req = true;
                 }
             }
@@ -168,8 +200,10 @@ impl CottonDataApp {
                         if let Some(pg) = &tab.page {
                             if sel_r < pg.row_count {
                                 tab.mutator.toggle_delete_row(sel_r);
+                                tab.bump_page_generation();
                             } else {
                                 tab.mutator.remove_inserted_row(sel_r - pg.row_count);
+                                tab.bump_page_generation();
                                 tab.selected_cell = None;
                             }
                         }
@@ -208,6 +242,7 @@ impl CottonDataApp {
                     if ghost_button(ui, p, icon::ARROW_U_UP_LEFT, "Revert all", can_save).clicked() {
                         tab.cancel_inline_edit();
                         tab.mutator.revert_all();
+                        tab.bump_page_generation();
                         if let Some((r, c)) = tab.selected_cell {
                             tab.select_cell(r, c);
                         }
@@ -217,6 +252,24 @@ impl CottonDataApp {
                 caption(ui, p, "Read-only").on_hover_text(reason.message());
             }
 
+            toolbar_divider(ui, p);
+            let filter_active = tab.grid_filter.open || !tab.grid_filter.query.trim().is_empty();
+            let filter_resp = if filter_active {
+                tinted_ghost_button(ui, p.accent, icon::FUNNEL, "Filter", true)
+            } else {
+                ghost_button(ui, p, icon::FUNNEL, "Filter", true)
+            };
+            if filter_resp
+                .on_hover_text("Filter loaded rows in memory (Cmd/Ctrl+Shift+F)")
+                .clicked()
+            {
+                if tab.grid_filter.open && tab.grid_filter.query.is_empty() {
+                    tab.grid_filter.open = false;
+                } else {
+                    tab.grid_filter.open = true;
+                    tab.grid_filter.focus_input = true;
+                }
+            }
             toolbar_divider(ui, p);
             let record_open = tab.record_view.is_some();
             let record_label = if record_open { "Hide list" } else { "Row list" };
@@ -306,12 +359,30 @@ impl CottonDataApp {
             self.mark_session_dirty();
         }
 
+        if let Some(page_size) = new_table_page_size {
+            if self.tabs[self.active_tab_idx].mutator.has_changes() {
+                self.unsaved_guard_modal = Some(PendingDiscardAction::ChangeTablePageSize(page_size));
+            } else {
+                self.tabs[self.active_tab_idx].filter_sort.page_size = page_size;
+                self.tabs[self.active_tab_idx].filter_sort.page_index = 0;
+                self.send_reload_active_table_page();
+            }
+        }
+
         if let Some(page_index) = reload_page_idx {
             if self.tabs[self.active_tab_idx].mutator.has_changes() {
                 self.unsaved_guard_modal = Some(PendingDiscardAction::ReloadTablePage { page_index });
             } else {
+                let prev_page = self.tabs[self.active_tab_idx].filter_sort.page_index;
+                let sequential_next = page_index == prev_page.saturating_add(1);
+                let dialect = self.slot_dialect(active_slot);
+                let keyset_seek = if sequential_next {
+                    self.build_active_tab_keyset_seek(dialect)
+                } else {
+                    None
+                };
                 self.tabs[self.active_tab_idx].filter_sort.page_index = page_index;
-                self.send_reload_active_table_page();
+                self.send_reload_active_table_page_with_seek(keyset_seek);
             }
         }
 
@@ -343,7 +414,68 @@ impl CottonDataApp {
             self.trigger_save_active_tab(force_preview);
         }
 
+        self.render_grid_filter_bar(ui, p);
         self.render_grid_body(ui, p, bound_table, editability);
+    }
+
+    fn render_grid_filter_bar(&mut self, ui: &mut egui::Ui, p: Palette) {
+        let tab = &mut self.tabs[self.active_tab_idx];
+        if !tab.grid_filter.open {
+            return;
+        }
+        let Some(page) = tab.page.clone() else {
+            return;
+        };
+        if !tab.grid_filter.query.trim().is_empty() {
+            let gen = tab.page_generation;
+            let mutator = &tab.mutator;
+            tab.grid_filter.ensure_synced(gen, &page, |r, c| {
+                mutator.get_modified(r, c).map(|v| v.as_display_str())
+            });
+        }
+        ui.add_space(4.0);
+        let mut close_bar = false;
+        inset_frame(p).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::MAGNIFYING_GLASS).size(13.0).color(p.accent));
+                let edit_resp = ui.add(
+                    egui::TextEdit::singleline(&mut tab.grid_filter.query)
+                        .id(egui::Id::new(("grid_filter_input", tab.id)))
+                        .hint_text("Filter loaded rows…")
+                        .desired_width(240.0),
+                );
+                if tab.grid_filter.focus_input {
+                    edit_resp.request_focus();
+                    tab.grid_filter.focus_input = false;
+                }
+                if edit_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close_bar = true;
+                }
+                if !tab.grid_filter.query.trim().is_empty() {
+                    let matched = tab.grid_filter.matched_rows.len();
+                    let total = page.row_count;
+                    caption(ui, p, format!("{matched}/{total} rows"));
+                } else {
+                    caption(ui, p, format!("{} rows", page.row_count));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, p, icon::X, "Clear and close filter (Esc)").clicked() {
+                        close_bar = true;
+                    }
+                    if !tab.grid_filter.query.is_empty()
+                        && ghost_button(ui, p, icon::X, "Clear", true).clicked()
+                    {
+                        tab.grid_filter.query.clear();
+                        tab.grid_filter.focus_input = true;
+                    }
+                });
+            });
+        });
+        if close_bar {
+            tab.grid_filter.query.clear();
+            tab.grid_filter.open = false;
+        }
     }
 
     fn export_active_page(&mut self, fmt: ExportFormat) {
@@ -461,5 +593,17 @@ impl CottonDataApp {
             path,
             cancel_flag,
         );
+    }
+}
+
+fn format_compact_count(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }

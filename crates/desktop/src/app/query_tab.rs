@@ -1,9 +1,42 @@
 use super::completion_popup::CompletionPopupState;
+use super::grid_filter::GridFilterState;
 use super::row_selection::RowSelection;
-use cottondata_core::{ServerSlotId, SqlDialect};
-use cottondata_grid::{CellValue, ColumnarPage, PageFilterSort, SortDirection, StagedMutator};
+use cottondata_core::{ServerSlotId, SqlDialect, DEFAULT_PAGE_SIZE, UNLIMITED_ROWS};
 use cottondata_driver::ExplainResult;
+use cottondata_grid::{CellValue, ColumnarPage, PageFilterSort, SortDirection, StagedMutator};
+use cottondata_sql::{find_matches, SearchOptions};
 use cottondata_storage::{SessionSortOrder, SessionTabState};
+use std::sync::Arc;
+
+pub(super) const QUERY_LIMIT_PRESETS: &[(u32, &str)] = &[
+    (50, "50"),
+    (100, "100"),
+    (200, "200"),
+    (500, "500"),
+    (1_000, "1,000"),
+    (UNLIMITED_ROWS, "Unlimited"),
+];
+
+pub(super) const TABLE_PAGE_SIZE_PRESETS: &[(u32, &str)] = &[
+    (50, "50"),
+    (100, "100"),
+    (200, "200"),
+    (500, "500"),
+    (1_000, "1,000"),
+];
+
+pub(super) const MAX_AUTO_SCROLL_ROWS: usize = 5_000;
+pub(super) const MAX_APPENDED_ROWS: usize = 10_000;
+
+pub(super) fn limit_label(limit: u32) -> String {
+    if limit == UNLIMITED_ROWS {
+        "Unlimited".into()
+    } else if limit >= 1_000 && limit % 1_000 == 0 {
+        format!("{},000", limit / 1_000)
+    } else {
+        limit.to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BottomDeckTab {
@@ -25,6 +58,55 @@ pub(super) struct FindReplaceState {
     pub(super) whole_word: bool,
     pub(super) active_match: usize,
     pub(super) focus_find: bool,
+    cached_sql_hash: u64,
+    cached_sql_len: usize,
+    cached_query: String,
+    cached_case_sensitive: bool,
+    cached_whole_word: bool,
+    cached_matches: Vec<(usize, usize)>,
+}
+
+impl FindReplaceState {
+    pub(super) fn matches_for(&mut self, sql: &str) -> &[(usize, usize)] {
+        if self.query.is_empty() {
+            if !self.cached_matches.is_empty() {
+                self.cached_matches.clear();
+                self.cached_query.clear();
+            }
+            return &self.cached_matches;
+        }
+        let sql_hash = fnv1a64(sql.as_bytes());
+        let cache_valid = self.cached_sql_hash == sql_hash
+            && self.cached_sql_len == sql.len()
+            && self.cached_query == self.query
+            && self.cached_case_sensitive == self.case_sensitive
+            && self.cached_whole_word == self.whole_word;
+        if !cache_valid {
+            let opts = SearchOptions {
+                case_sensitive: self.case_sensitive,
+                whole_word: self.whole_word,
+            };
+            self.cached_matches = find_matches(sql, &self.query, opts);
+            self.cached_sql_hash = sql_hash;
+            self.cached_sql_len = sql.len();
+            self.cached_query.clear();
+            self.cached_query.push_str(&self.query);
+            self.cached_case_sensitive = self.case_sensitive;
+            self.cached_whole_word = self.whole_word;
+        }
+        &self.cached_matches
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,12 +137,15 @@ pub(super) struct RecordViewState {
 #[derive(Clone)]
 pub(super) struct StoredResultSet {
     pub(super) label: String,
-    pub(super) page: ColumnarPage,
+    pub(super) page: Arc<ColumnarPage>,
     pub(super) status_msg: String,
     pub(super) mutator: StagedMutator,
     pub(super) column_widths: Vec<f32>,
     pub(super) selected_cell: Option<(usize, usize)>,
     pub(super) row_selection: RowSelection,
+    pub(super) batch_size: u32,
+    pub(super) keyset_order: Option<(String, SortDirection)>,
+    pub(super) scroll_fetch_failed: bool,
 }
 
 #[derive(Clone)]
@@ -73,7 +158,18 @@ pub(super) struct QueryTab {
     pub(super) selection_byte_range: Option<(usize, usize)>,
     pub(super) bound_table: Option<(String, String)>,
     pub(super) filter_sort: PageFilterSort,
-    pub(super) page: Option<ColumnarPage>,
+    pub(super) console_sort: Option<(usize, String, SortDirection)>,
+    pub(super) console_sorted_indices: Option<Vec<usize>>,
+    pub(super) console_base_sql: Option<String>,
+    pub(super) grid_filter: GridFilterState,
+    pub(super) page_generation: u64,
+    pub(super) row_limit: Option<u32>,
+    pub(super) auto_fetch_on_scroll: bool,
+    pub(super) is_loading_more: bool,
+    pub(super) scroll_fetch_failed: bool,
+    pub(super) loaded_batch_size: u32,
+    pub(super) loaded_keyset_order: Option<(String, SortDirection)>,
+    pub(super) page: Option<Arc<ColumnarPage>>,
     pub(super) result_sets: Vec<StoredResultSet>,
     pub(super) active_result_idx: usize,
     pub(super) last_status_msg: String,
@@ -110,9 +206,20 @@ impl QueryTab {
             selection_byte_range: None,
             bound_table: None,
             filter_sort: PageFilterSort {
-                page_size: 500,
+                page_size: DEFAULT_PAGE_SIZE,
                 ..Default::default()
             },
+            console_sort: None,
+            console_sorted_indices: None,
+            console_base_sql: None,
+            grid_filter: GridFilterState::default(),
+            page_generation: 0,
+            row_limit: None,
+            auto_fetch_on_scroll: true,
+            is_loading_more: false,
+            scroll_fetch_failed: false,
+            loaded_batch_size: DEFAULT_PAGE_SIZE,
+            loaded_keyset_order: None,
             page: None,
             result_sets: Vec::new(),
             active_result_idx: 0,
@@ -162,6 +269,17 @@ impl QueryTab {
             selection_byte_range: None,
             bound_table: Some((schema, table)),
             filter_sort,
+            console_sort: None,
+            console_sorted_indices: None,
+            console_base_sql: None,
+            grid_filter: GridFilterState::default(),
+            page_generation: 0,
+            row_limit: None,
+            auto_fetch_on_scroll: true,
+            is_loading_more: false,
+            scroll_fetch_failed: false,
+            loaded_batch_size: page_size.max(20),
+            loaded_keyset_order: None,
             page: None,
             result_sets: Vec::new(),
             active_result_idx: 0,
@@ -201,11 +319,12 @@ impl QueryTab {
             };
             (col.clone(), mapped)
         });
+        let page_size = state.page_size.max(20);
         let filter_sort = PageFilterSort {
             where_clause: state.where_clause.clone(),
             order_by,
             page_index: state.page_index,
-            page_size: state.page_size.max(50),
+            page_size,
         };
         let last_status_msg = if state.bound_table.is_some() {
             "Restored from session. Reconnecting to reload table…".into()
@@ -221,6 +340,17 @@ impl QueryTab {
             selection_byte_range: None,
             bound_table: state.bound_table.clone(),
             filter_sort,
+            console_sort: None,
+            console_sorted_indices: None,
+            console_base_sql: None,
+            grid_filter: GridFilterState::default(),
+            page_generation: 0,
+            row_limit: None,
+            auto_fetch_on_scroll: true,
+            is_loading_more: false,
+            scroll_fetch_failed: false,
+            loaded_batch_size: page_size,
+            loaded_keyset_order: None,
             page: None,
             result_sets: Vec::new(),
             active_result_idx: 0,
@@ -323,6 +453,15 @@ impl QueryTab {
             .unwrap_or(0)
     }
 
+    pub(super) fn bump_page_generation(&mut self) {
+        self.page_generation = self.page_generation.wrapping_add(1);
+    }
+
+    pub(super) fn reset_console_sort(&mut self) {
+        self.console_sort = None;
+        self.console_sorted_indices = None;
+    }
+
     pub(super) fn stage_cell_value(&mut self, row: usize, column: usize, new_val: CellValue) {
         let Some(page) = &self.page else {
             return;
@@ -332,6 +471,7 @@ impl QueryTab {
         } else {
             self.mutator.set_cell(page, row, column, new_val);
         }
+        self.bump_page_generation();
         if self.selected_cell == Some((row, column)) {
             self.select_cell(row, column);
         }
@@ -419,12 +559,15 @@ impl QueryTab {
 
     pub(super) fn save_active_result_snapshot(&mut self) {
         if let (Some(slot), Some(page)) = (self.result_sets.get_mut(self.active_result_idx), self.page.as_ref()) {
-            slot.page = page.clone();
+            slot.page = Arc::clone(page);
             slot.status_msg = self.last_status_msg.clone();
             slot.mutator = self.mutator.clone();
             slot.column_widths = self.column_widths.clone();
             slot.selected_cell = self.selected_cell;
             slot.row_selection = self.row_selection.clone();
+            slot.batch_size = self.loaded_batch_size;
+            slot.keyset_order = self.loaded_keyset_order.clone();
+            slot.scroll_fetch_failed = self.scroll_fetch_failed;
         }
     }
 
@@ -434,13 +577,21 @@ impl QueryTab {
         self.inline_editor = None;
         self.record_view = None;
         self.diff_rows = None;
+        self.is_loading_more = false;
+        self.reset_console_sort();
+        self.console_base_sql = None;
+        self.bump_page_generation();
         if let Some(first) = self.result_sets.first() {
-            self.page = Some(first.page.clone());
+            self.page = Some(Arc::clone(&first.page));
+            self.console_base_sql = Some(first.page.executed_sql.clone());
             self.last_status_msg = first.status_msg.clone();
             self.mutator = first.mutator.clone();
             self.column_widths = first.column_widths.clone();
             self.selected_cell = first.selected_cell;
             self.row_selection = first.row_selection.clone();
+            self.loaded_batch_size = first.batch_size;
+            self.loaded_keyset_order = first.keyset_order.clone();
+            self.scroll_fetch_failed = first.scroll_fetch_failed;
         }
     }
 
@@ -451,13 +602,20 @@ impl QueryTab {
         self.cancel_inline_edit();
         self.save_active_result_snapshot();
         self.active_result_idx = idx;
+        self.is_loading_more = false;
+        self.reset_console_sort();
+        self.bump_page_generation();
         let next = &self.result_sets[idx];
-        self.page = Some(next.page.clone());
+        self.page = Some(Arc::clone(&next.page));
+        self.console_base_sql = Some(next.page.executed_sql.clone());
         self.last_status_msg = next.status_msg.clone();
         self.mutator = next.mutator.clone();
         self.column_widths = next.column_widths.clone();
         self.selected_cell = next.selected_cell;
         self.row_selection = next.row_selection.clone();
+        self.loaded_batch_size = next.batch_size;
+        self.loaded_keyset_order = next.keyset_order.clone();
+        self.scroll_fetch_failed = next.scroll_fetch_failed;
         self.record_view = None;
         self.diff_rows = None;
     }
@@ -469,27 +627,37 @@ impl QueryTab {
         self.cancel_inline_edit();
         self.save_active_result_snapshot();
         self.result_sets.remove(idx);
+        self.is_loading_more = false;
+        self.reset_console_sort();
+        self.bump_page_generation();
         if self.result_sets.is_empty() {
             self.active_result_idx = 0;
             self.page = None;
+            self.console_base_sql = None;
             self.mutator.revert_all();
             self.column_widths.clear();
             self.selected_cell = None;
             self.row_selection.clear();
             self.record_view = None;
             self.diff_rows = None;
+            self.loaded_keyset_order = None;
+            self.scroll_fetch_failed = false;
             return;
         }
         if idx < self.active_result_idx || self.active_result_idx >= self.result_sets.len() {
             self.active_result_idx = self.active_result_idx.saturating_sub(1);
         }
         let next = &self.result_sets[self.active_result_idx];
-        self.page = Some(next.page.clone());
+        self.page = Some(Arc::clone(&next.page));
+        self.console_base_sql = Some(next.page.executed_sql.clone());
         self.last_status_msg = next.status_msg.clone();
         self.mutator = next.mutator.clone();
         self.column_widths = next.column_widths.clone();
         self.selected_cell = next.selected_cell;
         self.row_selection = next.row_selection.clone();
+        self.loaded_batch_size = next.batch_size;
+        self.loaded_keyset_order = next.keyset_order.clone();
+        self.scroll_fetch_failed = next.scroll_fetch_failed;
         self.record_view = None;
         self.diff_rows = None;
     }

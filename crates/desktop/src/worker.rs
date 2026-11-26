@@ -2,7 +2,8 @@ use crate::drivers::{kill_running_query, open_session};
 use cottondata_core::{DatabaseEngine, ServerProfile, ServerRuntimeInfo, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
 use cottondata_driver::{DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, ServerHealthMetrics};
 use cottondata_grid::{
-    stream_import_batches, ColumnMapping, ExportFormat, ImportFormat, PageFilterSort, StreamExporter, TargetColumnSpec,
+    stream_import_batches, ColumnMapping, ExportFormat, ImportFormat, KeysetSeek, PageFilterSort, StreamExporter,
+    TargetColumnSpec,
 };
 use cottondata_introspect::{compare_schema_snapshots, snapshot_from_catalog, SchemaCatalog, SchemaDiff, TableDetail};
 use eframe::egui;
@@ -34,6 +35,11 @@ pub enum SlotCmd {
         sql: String,
         max_rows: u32,
     },
+    FetchMoreRows {
+        tab_id: u64,
+        sql: String,
+        max_rows: u32,
+    },
     ExecuteScript {
         tab_id: u64,
         statements: Vec<String>,
@@ -44,6 +50,8 @@ pub enum SlotCmd {
         schema: String,
         table: String,
         filter_sort: PageFilterSort,
+        default_order_column: Option<String>,
+        keyset_seek: Option<KeysetSeek>,
     },
     CountTableRows {
         tab_id: u64,
@@ -83,7 +91,7 @@ pub enum WorkerEvent {
     Connected {
         slot: ServerSlotId,
         runtime: ServerRuntimeInfo,
-        catalog: SchemaCatalog,
+        catalog: Arc<SchemaCatalog>,
     },
     Disconnected {
         slot: ServerSlotId,
@@ -98,7 +106,7 @@ pub enum WorkerEvent {
     },
     CatalogUpdated {
         slot: ServerSlotId,
-        catalog: SchemaCatalog,
+        catalog: Arc<SchemaCatalog>,
     },
     TableDetailLoaded {
         slot: ServerSlotId,
@@ -108,6 +116,12 @@ pub enum WorkerEvent {
         show_in_inspector: bool,
     },
     QueryFinished {
+        slot: ServerSlotId,
+        tab_id: u64,
+        outcome: QueryOutcome,
+        runtime: ServerRuntimeInfo,
+    },
+    MoreRowsLoaded {
         slot: ServerSlotId,
         tab_id: u64,
         outcome: QueryOutcome,
@@ -184,6 +198,16 @@ pub enum WorkerEvent {
         schema: String,
         relations: Vec<(String, String, String, String, String)>,
     },
+    UpdateCheckFinished(Result<crate::updater::ReleaseInfo, String>),
+    UpdateProgress {
+        downloaded: u64,
+        total: u64,
+    },
+    UpdateReady {
+        info: crate::updater::ReleaseInfo,
+        file_path: PathBuf,
+    },
+    UpdateFailed(String),
 }
 
 struct SlotWorker {
@@ -215,25 +239,101 @@ impl WorkerHub {
         }
     }
 
+    fn spawn_slot_worker(&mut self, slot: ServerSlotId) {
+        let idx = slot.index();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let handle = thread::Builder::new()
+            .name(format!("cottondata-slot-{}", slot.display_number()))
+            .stack_size(1024 * 1024)
+            .spawn(move || slot_worker_loop(slot, cmd_rx, ev_tx, ctx))
+            .expect("spawn database slot worker");
+        self.workers[idx] = Some(SlotWorker {
+            tx: cmd_tx,
+            _handle: handle,
+        });
+    }
+
+    pub fn disconnect_slot(&mut self, slot: ServerSlotId) {
+        if let Some(worker) = self.workers[slot.index()].take() {
+            let _ = worker.tx.send(SlotCmd::Disconnect);
+        }
+    }
+
     pub fn send(&mut self, slot: ServerSlotId, cmd: SlotCmd) {
+        if matches!(cmd, SlotCmd::Disconnect) {
+            self.disconnect_slot(slot);
+            return;
+        }
         let idx = slot.index();
         if self.workers[idx].is_none() {
-            let (cmd_tx, cmd_rx) = mpsc::channel();
-            let ev_tx = self.event_tx.clone();
-            let ctx = self.repaint_ctx.clone();
-            let handle = thread::Builder::new()
-                .name(format!("cottondata-slot-{}", slot.display_number()))
-                .stack_size(1024 * 1024)
-                .spawn(move || slot_worker_loop(slot, cmd_rx, ev_tx, ctx))
-                .expect("spawn database slot worker");
-            self.workers[idx] = Some(SlotWorker {
-                tx: cmd_tx,
-                _handle: handle,
+            self.spawn_slot_worker(slot);
+        }
+        let send_failed = match &self.workers[idx] {
+            Some(worker) => worker.tx.send(cmd).err(),
+            None => None,
+        };
+        if let Some(mpsc::SendError(unsent)) = send_failed {
+            self.workers[idx] = None;
+            self.spawn_slot_worker(slot);
+            if let Some(worker) = &self.workers[idx] {
+                let _ = worker.tx.send(unsent);
+            }
+        }
+    }
+
+    pub fn check_for_updates_async(&self) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-update-check".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let result = crate::updater::check_latest_release();
+                emit(&ev_tx, &ctx, WorkerEvent::UpdateCheckFinished(result));
             });
-        }
-        if let Some(worker) = &self.workers[idx] {
-            let _ = worker.tx.send(cmd);
-        }
+    }
+
+    pub fn check_for_updates_delayed_async(&self, delay: std::time::Duration) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-update-check".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                thread::sleep(delay);
+                let result = crate::updater::check_latest_release();
+                emit(&ev_tx, &ctx, WorkerEvent::UpdateCheckFinished(result));
+            });
+    }
+
+    pub fn download_update_async(&self, info: crate::updater::ReleaseInfo, cancel: Arc<AtomicBool>) {
+        let ev_tx = self.event_tx.clone();
+        let ctx = self.repaint_ctx.clone();
+        let _ = thread::Builder::new()
+            .name("cottondata-update-dl".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let mut last_emit = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(100))
+                    .unwrap_or_else(std::time::Instant::now);
+                let res = crate::updater::download_and_verify_asset(&info, &cancel, |downloaded, total| {
+                    let is_edge = downloaded == 0 || (total > 0 && downloaded >= total);
+                    if is_edge || last_emit.elapsed() >= std::time::Duration::from_millis(50) {
+                        last_emit = std::time::Instant::now();
+                        emit(
+                            &ev_tx,
+                            &ctx,
+                            WorkerEvent::UpdateProgress { downloaded, total },
+                        );
+                    }
+                });
+                match res {
+                    Ok(file_path) => emit(&ev_tx, &ctx, WorkerEvent::UpdateReady { info, file_path }),
+                    Err(err) => emit(&ev_tx, &ctx, WorkerEvent::UpdateFailed(err)),
+                }
+            });
     }
 
     pub fn cancel_query_async(
@@ -609,23 +709,25 @@ fn slot_worker_loop(
     ctx: Option<egui::Context>,
 ) {
     let mut session: Option<Box<dyn DatabaseSession>> = None;
-    let mut catalog = SchemaCatalog::new();
+    let mut catalog = Arc::new(SchemaCatalog::new());
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SlotCmd::Connect { profile, password } => {
                 session = None;
-                catalog = SchemaCatalog::new();
+                catalog = Arc::new(SchemaCatalog::new());
                 match open_session(&profile, password.as_deref()) {
                     Ok(mut sess) => {
-                        if let Err(err) = catalog.introspect_l0(sess.as_mut()) {
+                        let mut fresh_catalog = SchemaCatalog::new();
+                        if let Err(err) = fresh_catalog.introspect_l0(sess.as_mut()) {
                             emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: err });
                         }
                         if let Some(default_db) = sess.runtime().current_schema.clone() {
-                            let _ = catalog.introspect_schema_l1(sess.as_mut(), &default_db);
+                            let _ = fresh_catalog.introspect_schema_l1(sess.as_mut(), &default_db);
                         }
                         let runtime = sess.runtime().clone();
-                        let snapshot = catalog.snapshot();
+                        let shared = Arc::new(fresh_catalog);
+                        catalog = Arc::clone(&shared);
                         session = Some(sess);
                         emit(
                             &tx,
@@ -633,7 +735,7 @@ fn slot_worker_loop(
                             WorkerEvent::Connected {
                                 slot,
                                 runtime,
-                                catalog: snapshot,
+                                catalog: shared,
                             },
                         );
                     }
@@ -643,9 +745,10 @@ fn slot_worker_loop(
                 }
             }
             SlotCmd::Disconnect => {
-                session = None;
-                catalog = SchemaCatalog::new();
+                drop(session);
+                drop(catalog);
                 emit(&tx, &ctx, WorkerEvent::Disconnected { slot });
+                break;
             }
             SlotCmd::Ping => {
                 let is_dead = match session.as_mut() {
@@ -653,9 +756,10 @@ fn slot_worker_loop(
                     None => false,
                 };
                 if is_dead {
-                    session = None;
-                    catalog = SchemaCatalog::new();
+                    drop(session);
+                    drop(catalog);
                     emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                    break;
                 }
             }
             SlotCmd::LoadSchemaL1 { schema } => {
@@ -663,10 +767,13 @@ fn slot_worker_loop(
                     emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error: DbError::message("Not connected") });
                     continue;
                 };
-                match catalog.introspect_schema_l1(sess.as_mut(), &schema) {
-                    Ok(()) => {
-                        let snapshot = catalog.snapshot();
-                        emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: snapshot });
+                match sess.load_schema_objects(&schema) {
+                    Ok(objects) => {
+                        let mut updated = Arc::try_unwrap(catalog).unwrap_or_else(|arc| arc.snapshot());
+                        updated.apply_schema_objects(&schema, objects);
+                        let shared = Arc::new(updated);
+                        catalog = Arc::clone(&shared);
+                        emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: shared });
                     }
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }
@@ -680,7 +787,7 @@ fn slot_worker_loop(
                     emit_not_connected(&tx, &ctx, slot, None);
                     continue;
                 };
-                match catalog.introspect_table_l2(sess.as_mut(), &schema, &table) {
+                match sess.load_table_detail(&schema, &table) {
                     Ok(detail) => emit(
                         &tx,
                         &ctx,
@@ -722,9 +829,49 @@ fn slot_worker_loop(
                         let lost = error.is_connection_lost;
                         emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
                         if lost {
-                            session = None;
-                            catalog = SchemaCatalog::new();
+                            drop(session);
+                            drop(catalog);
                             emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                            break;
+                        }
+                    }
+                }
+            }
+            SlotCmd::FetchMoreRows { tab_id, sql, max_rows } => {
+                let Some(sess) = session.as_mut() else {
+                    emit(
+                        &tx,
+                        &ctx,
+                        WorkerEvent::Error {
+                            slot,
+                            tab_id: Some(tab_id),
+                            error: DbError::message("Connect to this server first."),
+                        },
+                    );
+                    continue;
+                };
+                match sess.execute_sql(&sql, max_rows) {
+                    Ok(outcome) => {
+                        let runtime = sess.runtime().clone();
+                        emit(
+                            &tx,
+                            &ctx,
+                            WorkerEvent::MoreRowsLoaded {
+                                slot,
+                                tab_id,
+                                outcome,
+                                runtime,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let lost = error.is_connection_lost;
+                        emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
+                        if lost {
+                            drop(session);
+                            drop(catalog);
+                            emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                            break;
                         }
                     }
                 }
@@ -749,7 +896,14 @@ fn slot_worker_loop(
                 let mut outcomes = Vec::with_capacity(statements.len());
                 let mut script_error = None;
                 for sql in statements {
-                    match sess.execute_sql(&sql, max_rows) {
+                    let stmt_limit = if max_rows != cottondata_core::UNLIMITED_ROWS
+                        && cottondata_sql::has_explicit_row_limit(&sql)
+                    {
+                        cottondata_core::UNLIMITED_ROWS
+                    } else {
+                        max_rows
+                    };
+                    match sess.execute_sql(&sql, stmt_limit) {
                         Ok(outcome) => outcomes.push(outcome),
                         Err(error) => {
                             script_error = Some(error);
@@ -774,9 +928,10 @@ fn slot_worker_loop(
                     let lost = error.is_connection_lost;
                     emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
                     if lost {
-                        session = None;
-                        catalog = SchemaCatalog::new();
+                        drop(session);
+                        drop(catalog);
                         emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                        break;
                     }
                 }
             }
@@ -785,12 +940,23 @@ fn slot_worker_loop(
                 schema,
                 table,
                 filter_sort,
+                default_order_column,
+                keyset_seek,
             } => {
                 let Some(sess) = session.as_mut() else {
                     emit_not_connected(&tx, &ctx, slot, Some(tab_id));
                     continue;
                 };
-                let sql = filter_sort.build_select_sql(sess.dialect(), &schema, &table);
+                let fetch_limit = filter_sort.page_size.max(1).saturating_add(1);
+                let sql = match keyset_seek.as_ref() {
+                    Some(seek) => filter_sort.build_keyset_select_sql(sess.dialect(), &schema, &table, seek, fetch_limit),
+                    None => filter_sort.build_select_sql_with_default_order(
+                        sess.dialect(),
+                        &schema,
+                        &table,
+                        default_order_column.as_deref(),
+                    ),
+                };
                 match sess.execute_sql(&sql, filter_sort.page_size) {
                     Ok(outcome) => {
                         let runtime = sess.runtime().clone();
@@ -809,9 +975,10 @@ fn slot_worker_loop(
                         let lost = error.is_connection_lost;
                         emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: Some(tab_id), error });
                         if lost {
-                            session = None;
-                            catalog = SchemaCatalog::new();
+                            drop(session);
+                            drop(catalog);
                             emit(&tx, &ctx, WorkerEvent::ConnectionLost { slot });
+                            break;
                         }
                     }
                 }
@@ -927,11 +1094,19 @@ fn slot_worker_loop(
                 };
                 match sess.set_schema(&schema) {
                     Ok(()) => {
-                        let _ = catalog.introspect_schema_l1(sess.as_mut(), &schema);
+                        let objects = sess.load_schema_objects(&schema).ok();
                         let runtime = sess.runtime().clone();
-                        let snapshot = catalog.snapshot();
+                        let shared = if let Some(objects) = objects {
+                            let mut updated = Arc::try_unwrap(catalog).unwrap_or_else(|arc| arc.snapshot());
+                            updated.apply_schema_objects(&schema, objects);
+                            let arc = Arc::new(updated);
+                            catalog = Arc::clone(&arc);
+                            arc
+                        } else {
+                            Arc::clone(&catalog)
+                        };
                         emit(&tx, &ctx, WorkerEvent::RuntimeUpdated { slot, runtime });
-                        emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: snapshot });
+                        emit(&tx, &ctx, WorkerEvent::CatalogUpdated { slot, catalog: shared });
                     }
                     Err(error) => emit(&tx, &ctx, WorkerEvent::Error { slot, tab_id: None, error }),
                 }

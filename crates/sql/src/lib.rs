@@ -3,6 +3,7 @@ pub mod ddl_builder;
 pub mod edit;
 pub mod format;
 pub mod lexer;
+pub mod paging;
 pub mod params;
 pub mod safety;
 
@@ -16,6 +17,10 @@ pub use edit::{
 };
 pub use format::format_mysql;
 pub use lexer::{split_statements, statement_at_offset, tokenize, SqlStatement, Token, TokenKind};
+pub use paging::{
+    build_paginated_query, build_sorted_query, can_auto_paginate, has_explicit_row_limit,
+    is_pageable_read_query, strip_trailing_terminator,
+};
 pub use params::{
     bind_query_params, bind_statements_params, extract_params_for_statements,
     extract_query_params, format_param_literal, query_param_fingerprint, ParamBinding,

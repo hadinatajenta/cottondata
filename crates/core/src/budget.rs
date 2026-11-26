@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-pub const DEFAULT_GRID_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_GRID_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_INLINE_CELL_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,5 +112,20 @@ mod tests {
         assert_eq!(evicted, vec!["tab-2".to_string()]);
         assert_eq!(budget.stats().used_bytes, 2 * 1024 * 1024);
         assert_eq!(budget.stats().eviction_count, 1);
+    }
+
+    #[test]
+    fn default_budget_is_sixteen_mib_and_remove_frees_tracked_bytes() {
+        let mut budget = MemoryBudget::default();
+        assert_eq!(budget.stats().limit_bytes, 16 * 1024 * 1024);
+        assert!(budget.record_allocation("tab-1", 4 * 1024 * 1024).is_empty());
+        assert!(budget.record_allocation("tab-2", 6 * 1024 * 1024).is_empty());
+        assert_eq!(budget.stats().tracked_entries, 2);
+        assert_eq!(budget.stats().used_bytes, 10 * 1024 * 1024);
+
+        assert_eq!(budget.remove("tab-1"), 4 * 1024 * 1024);
+        assert_eq!(budget.remove("missing"), 0);
+        assert_eq!(budget.stats().tracked_entries, 1);
+        assert_eq!(budget.stats().used_bytes, 6 * 1024 * 1024);
     }
 }

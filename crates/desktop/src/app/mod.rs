@@ -3,6 +3,7 @@ mod completion_popup;
 mod data_grid;
 mod er_diagram;
 mod events;
+mod grid_filter;
 mod grid_table;
 mod import_modal;
 mod inspectors;
@@ -11,6 +12,7 @@ mod navigator;
 mod params_modal;
 mod query_actions;
 mod query_tab;
+mod quick_switcher;
 mod record_view;
 mod result_table;
 mod row_selection;
@@ -25,14 +27,16 @@ mod structure_editor;
 mod table_actions;
 mod top_bar;
 mod transaction_bar;
+mod update_modal;
 mod workspace;
 
 use crate::theme::{install_fonts, AppTheme};
 use crate::worker::{SlotCmd, WorkerHub};
 use activity::SlotActivity;
 use cottondata_core::{ConnectionStatus, MemoryBudget, ServerRegistry, ServerSlotId, SqlDialect, SERVER_SLOT_CAPACITY};
-use cottondata_introspect::{SchemaCatalog, TableDetail};
 use cottondata_driver::{ProcessEntry, ServerHealthMetrics};
+use cottondata_grid::SortDirection;
+use cottondata_introspect::{SchemaCatalog, TableDetail, TableKind};
 use cottondata_sql::ParamBinding;
 use cottondata_storage::{
     AppStorage, ConnectedServerState, QueryHistoryItem, SessionTabState, SessionsStore, SnippetScopeFilter,
@@ -43,16 +47,69 @@ use er_diagram::ErDiagramState;
 use import_modal::ImportModalState;
 use params_modal::ParamModalState;
 use query_tab::{BottomDeckTab, QueryTab};
+use quick_switcher::{render_quick_switcher, QuickSwitcherItem, QuickSwitcherState, QuickSwitcherTarget};
 use schema_compare::SchemaCompareState;
 use server_form::ServerModalState;
 use sessions::SessionModalState;
 use settings_modal::SettingsModalState;
 use snippets::SnippetModalState;
 use structure_editor::StructureEditorState;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use update_modal::{render_update_modal, UpdateModalAction, UpdateModalState, UpdateStatus};
+
+const MAX_TABLE_DETAILS_CACHE: usize = 64;
+
+pub(super) struct TableDetailsCache {
+    entries: HashMap<(usize, String, String), TableDetail>,
+    order: VecDeque<(usize, String, String)>,
+}
+
+impl TableDetailsCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    pub(super) fn get(&self, key: &(usize, String, String)) -> Option<&TableDetail> {
+        self.entries.get(key)
+    }
+
+    pub(super) fn contains_key(&self, key: &(usize, String, String)) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    pub(super) fn insert(&mut self, key: (usize, String, String), detail: TableDetail) {
+        if let Some(pos) = self.order.iter().position(|k| k == &key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, detail);
+        while self.entries.len() > MAX_TABLE_DETAILS_CACHE {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn remove(&mut self, key: &(usize, String, String)) {
+        self.entries.remove(key);
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+    }
+
+    pub(super) fn retain_slot_ne(&mut self, slot_idx: usize) {
+        self.entries.retain(|(s, _, _), _| *s != slot_idx);
+        self.order.retain(|(s, _, _)| *s != slot_idx);
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ActiveStreamExport {
@@ -73,8 +130,14 @@ pub(super) enum HistoryStatusFilter {
 pub(super) enum PendingDiscardAction {
     CloseTab(usize),
     ReloadTablePage { page_index: u64 },
-    SortColumn(String),
+    ChangeTablePageSize(u32),
+    SortColumnExplicit {
+        col_idx: usize,
+        col_name: String,
+        direction: Option<SortDirection>,
+    },
     RunQuery(bool),
+    RunQueryUnlimited,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,9 +181,10 @@ pub struct CottonDataApp {
     storage: AppStorage,
     registry: ServerRegistry,
     active_slot: Option<ServerSlotId>,
+    pub(super) dragging_server: Option<ServerSlotId>,
     hub: WorkerHub,
-    catalogs: [Option<SchemaCatalog>; SERVER_SLOT_CAPACITY],
-    table_details: HashMap<(usize, String, String), TableDetail>,
+    catalogs: [Option<Arc<SchemaCatalog>>; SERVER_SLOT_CAPACITY],
+    table_details: TableDetailsCache,
     table_details_loading: HashSet<(usize, String, String)>,
     processlists: [Vec<ProcessEntry>; SERVER_SLOT_CAPACITY],
     health: [Option<ServerHealthMetrics>; SERVER_SLOT_CAPACITY],
@@ -149,6 +213,9 @@ pub struct CottonDataApp {
     modal: Option<ServerModalState>,
     session_modal: Option<SessionModalState>,
     settings_modal: Option<SettingsModalState>,
+    pub(super) update_modal: UpdateModalState,
+    silent_update_check: bool,
+    quick_switcher: QuickSwitcherState,
     sql_preview_modal: Option<(u64, String, Vec<String>)>,
     unsaved_guard_modal: Option<PendingDiscardAction>,
     after_save_action: Option<PendingDiscardAction>,
@@ -183,6 +250,7 @@ impl CottonDataApp {
         };
         theme.apply(&cc.egui_ctx);
         let show_system_schemas = sessions_store.show_system_schemas;
+        let auto_check_updates = sessions_store.auto_check_updates;
         let active_slot = registry.iter().next().map(|s| s.slot_id);
         let history = storage.load_history();
         let snippets_store = storage.load_snippets();
@@ -194,9 +262,10 @@ impl CottonDataApp {
             storage,
             registry,
             active_slot,
+            dragging_server: None,
             hub,
             catalogs: std::array::from_fn(|_| None),
-            table_details: HashMap::new(),
+            table_details: TableDetailsCache::new(),
             table_details_loading: HashSet::new(),
             processlists: std::array::from_fn(|_| Vec::new()),
             health: std::array::from_fn(|_| None),
@@ -225,6 +294,9 @@ impl CottonDataApp {
             modal: None,
             session_modal: None,
             settings_modal: None,
+            update_modal: UpdateModalState::default(),
+            silent_update_check: false,
+            quick_switcher: QuickSwitcherState::default(),
             sql_preview_modal: None,
             unsaved_guard_modal: None,
             after_save_action: None,
@@ -244,6 +316,10 @@ impl CottonDataApp {
             active_export: None,
         };
         app.restore_active_session(true);
+        if auto_check_updates {
+            app.silent_update_check = true;
+            app.hub.check_for_updates_delayed_async(Duration::from_secs(3));
+        }
         app
     }
 
@@ -307,12 +383,15 @@ impl CottonDataApp {
             return;
         }
         let removed = self.tabs.remove(idx);
+        let removed_id = removed.id;
         let saved_state = removed.to_session_state(removed.slot.and_then(|s| self.server_id_for_slot(s)));
+        drop(removed);
         self.closed_tabs.push(saved_state);
         if self.closed_tabs.len() > 10 {
             self.closed_tabs.remove(0);
         }
-        self.memory_budget.remove(&format!("tab-{}", removed.id));
+        self.memory_budget.remove(&format!("tab-{removed_id}"));
+        crate::purge_unused_memory();
         if idx < self.active_tab_idx || self.active_tab_idx >= self.tabs.len() {
             self.active_tab_idx = self.active_tab_idx.saturating_sub(1);
         }
@@ -353,10 +432,49 @@ impl CottonDataApp {
     }
 
     pub(super) fn slot_display_name(&self, slot: ServerSlotId) -> String {
+        let num = self
+            .registry
+            .display_number_of(slot)
+            .unwrap_or_else(|| slot.display_number());
         self.registry
             .get(slot)
-            .map(|s| format!("{slot} {}", s.profile.name))
-            .unwrap_or_else(|| slot.to_string())
+            .map(|s| format!("#{num} {}", s.profile.name))
+            .unwrap_or_else(|| format!("#{num}"))
+    }
+
+    pub(super) fn trigger_update_check(&mut self, open_modal: bool) {
+        if open_modal {
+            self.update_modal.open = true;
+            self.silent_update_check = false;
+        } else {
+            self.silent_update_check = true;
+        }
+        if matches!(
+            self.update_modal.status,
+            UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Applying(_)
+        ) {
+            return;
+        }
+        if open_modal
+            || matches!(
+                self.update_modal.status,
+                UpdateStatus::Idle | UpdateStatus::UpToDate { .. } | UpdateStatus::Failed(_)
+            )
+        {
+            self.update_modal.status = UpdateStatus::Checking;
+        }
+        self.hub.check_for_updates_async();
+    }
+
+    pub(super) fn open_update_modal(&mut self) {
+        self.update_modal.open = true;
+        if matches!(self.update_modal.status, UpdateStatus::Idle | UpdateStatus::Failed(_)) {
+            self.trigger_update_check(true);
+        }
+    }
+
+    pub(super) fn open_quick_switcher(&mut self) {
+        self.quick_switcher.open_fresh();
     }
 
     pub(super) fn notify_success(&mut self, message: impl Into<String>) {
@@ -417,7 +535,13 @@ impl CottonDataApp {
             s.status = ConnectionStatus::Disconnected;
             s.runtime = None;
         }
-        self.hub.send(slot, SlotCmd::Disconnect);
+        self.catalogs[slot.index()] = None;
+        self.table_details.retain_slot_ne(slot.index());
+        self.table_details_loading.retain(|(s, _, _)| *s != slot.index());
+        self.processlists[slot.index()].clear();
+        self.health[slot.index()] = None;
+        self.hub.disconnect_slot(slot);
+        crate::purge_unused_memory();
         self.notify_info(format!("Disconnected from {label}"));
         self.persist_sessions_now();
     }
@@ -457,6 +581,8 @@ impl CottonDataApp {
         self.modal.is_some()
             || self.session_modal.is_some()
             || self.settings_modal.is_some()
+            || self.update_modal.open
+            || self.quick_switcher.open
             || self.snippet_modal.is_some()
             || self.param_modal.is_some()
             || self.structure_editor.is_some()
@@ -481,14 +607,29 @@ impl CottonDataApp {
             egui::Key::Num9,
             egui::Key::Num0,
         ];
+        let other_modal_open = self.is_any_modal_open() && !self.quick_switcher.open;
+        if !other_modal_open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
+        {
+            if self.quick_switcher.open {
+                self.quick_switcher.close();
+            } else {
+                self.open_quick_switcher();
+            }
+            return;
+        }
+
         let modal_open = self.is_any_modal_open();
         let is_editing_cell = self.tabs[self.active_tab_idx].inline_editor.is_some();
+        let wants_kb = ctx.wants_keyboard_input();
         let mut run_query = false;
         let mut run_all_queries = false;
         let mut new_console = false;
         let mut reopen_tab = false;
         let mut close_active = false;
         let mut open_find: Option<bool> = None;
+        let mut toggle_grid_filter = false;
+        let mut refresh_active = false;
         let mut save_snippet = false;
         let mut chosen_slot = None;
         ctx.input(|i| {
@@ -510,10 +651,23 @@ impl CottonDataApp {
                 close_active = true;
             }
             if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::F) {
-                open_find = Some(false);
+                if i.modifiers.shift {
+                    toggle_grid_filter = true;
+                } else {
+                    open_find = Some(false);
+                }
             }
             if !modal_open && !is_editing_cell && i.modifiers.command && i.key_pressed(egui::Key::H) {
                 open_find = Some(true);
+            }
+            if !modal_open
+                && !is_editing_cell
+                && !wants_kb
+                && i.modifiers.command
+                && !i.modifiers.shift
+                && i.key_pressed(egui::Key::R)
+            {
+                refresh_active = true;
             }
             if !modal_open
                 && !is_editing_cell
@@ -526,7 +680,7 @@ impl CottonDataApp {
             if !modal_open && i.modifiers.command {
                 for (idx, key) in keys.iter().enumerate() {
                     if i.key_pressed(*key) {
-                        if let Some(slot_id) = ServerSlotId::new(idx) {
+                        if let Some(slot_id) = self.registry.slot_at_position(idx) {
                             if self.registry.get(slot_id).is_some() {
                                 chosen_slot = Some(slot_id);
                             }
@@ -540,8 +694,28 @@ impl CottonDataApp {
         } else if run_query {
             self.request_execute_active_tab(false);
         }
-        if let Some(show_replace) = open_find {
+        if toggle_grid_filter {
+            let tab = &mut self.tabs[self.active_tab_idx];
+            if tab.page.is_some() {
+                tab.grid_filter.open = true;
+                tab.grid_filter.focus_input = true;
+                self.bottom_tab = BottomDeckTab::DataGrid;
+            }
+        } else if let Some(show_replace) = open_find {
             self.open_sql_find(show_replace);
+        }
+        if refresh_active {
+            let tab = &self.tabs[self.active_tab_idx];
+            if tab.bound_table.is_some() {
+                let page_index = tab.filter_sort.page_index;
+                if tab.mutator.has_changes() {
+                    self.unsaved_guard_modal = Some(PendingDiscardAction::ReloadTablePage { page_index });
+                } else {
+                    self.send_reload_active_table_page();
+                }
+            } else if tab.page.is_some() {
+                self.request_execute_active_tab(false);
+            }
         }
         if save_snippet {
             let sql = self.tabs[self.active_tab_idx].sql.clone();
@@ -560,6 +734,164 @@ impl CottonDataApp {
             self.mark_session_dirty();
         }
     }
+
+    fn build_quick_switcher_items(&self, palette: crate::theme::Palette) -> Vec<QuickSwitcherItem> {
+        let mut items = Vec::new();
+        let schema_rgb = [
+            palette.icon_schema.r(),
+            palette.icon_schema.g(),
+            palette.icon_schema.b(),
+        ];
+        let table_rgb = [
+            palette.icon_table.r(),
+            palette.icon_table.g(),
+            palette.icon_table.b(),
+        ];
+        let view_rgb = [
+            palette.icon_view.r(),
+            palette.icon_view.g(),
+            palette.icon_view.b(),
+        ];
+
+        for (pos, slot) in self.registry.iter().enumerate() {
+            let display_num = pos + 1;
+            let status_hint = match &slot.status {
+                ConnectionStatus::Connected => "Connected",
+                ConnectionStatus::Connecting => "Connecting…",
+                ConnectionStatus::Disconnected => "Disconnected",
+                ConnectionStatus::Error(_) => "Error",
+            };
+            items.push(QuickSwitcherItem {
+                title: format!("#{display_num} {}", slot.profile.name),
+                subtitle: format!(
+                    "{} · {} · {status_hint}",
+                    slot.profile.engine.label(),
+                    slot.profile.endpoint.display_address()
+                ),
+                badge: slot.profile.env_display_label().to_string(),
+                badge_rgb: slot.profile.env_display_rgb(),
+                target: QuickSwitcherTarget::Server(slot.slot_id),
+            });
+
+            if let Some(catalog) = &self.catalogs[slot.slot_id.index()] {
+                for schema in catalog.schemas() {
+                    if schema.is_system && !self.show_system_schemas {
+                        continue;
+                    }
+                    let schema_name = catalog.resolve(schema.name);
+                    items.push(QuickSwitcherItem {
+                        title: schema_name.to_string(),
+                        subtitle: format!("#{display_num} {}", slot.profile.name),
+                        badge: "Schema".to_string(),
+                        badge_rgb: schema_rgb,
+                        target: QuickSwitcherTarget::Schema {
+                            slot_id: slot.slot_id,
+                            schema: schema_name.to_string(),
+                        },
+                    });
+                    for table in &schema.tables {
+                        let table_name = catalog.resolve(table.name);
+                        let (badge, rgb) = match table.kind {
+                            TableKind::BaseTable => ("Table", table_rgb),
+                            TableKind::View => ("View", view_rgb),
+                        };
+                        items.push(QuickSwitcherItem {
+                            title: table_name.to_string(),
+                            subtitle: format!("#{display_num} {} · {schema_name}", slot.profile.name),
+                            badge: badge.to_string(),
+                            badge_rgb: rgb,
+                            target: QuickSwitcherTarget::Table {
+                                slot_id: slot.slot_id,
+                                schema: schema_name.to_string(),
+                                table: table_name.to_string(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    fn render_update_and_switcher_overlays(&mut self, ctx: &egui::Context, palette: crate::theme::Palette) {
+        if self.update_modal.open {
+            match render_update_modal(ctx, &mut self.update_modal, &palette) {
+                UpdateModalAction::None => {}
+                UpdateModalAction::CheckNow => {
+                    self.trigger_update_check(true);
+                }
+                UpdateModalAction::StartDownload(info) => {
+                    let info = *info;
+                    self.update_modal.cancel_flag.store(false, Ordering::Relaxed);
+                    self.update_modal.status = UpdateStatus::Downloading {
+                        info: info.clone(),
+                        downloaded: 0,
+                        total: info.asset_size,
+                    };
+                    self.hub
+                        .download_update_async(info, Arc::clone(&self.update_modal.cancel_flag));
+                }
+                UpdateModalAction::CancelDownload => {
+                    self.update_modal.cancel_flag.store(true, Ordering::Relaxed);
+                }
+                UpdateModalAction::OpenUrl(url) => {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+                UpdateModalAction::CopyCommand(cmd) => {
+                    ctx.copy_text(cmd);
+                    self.notify_success("Copied install command to clipboard.");
+                }
+            }
+        }
+
+        if self.quick_switcher.open {
+            let items = self.build_quick_switcher_items(palette);
+            if let Some(target) = render_quick_switcher(ctx, &mut self.quick_switcher, &items, &palette) {
+                match target {
+                    QuickSwitcherTarget::Server(slot_id) => {
+                        self.active_slot = Some(slot_id);
+                        self.expanded_servers[slot_id.index()] = true;
+                        if self
+                            .registry
+                            .get(slot_id)
+                            .is_some_and(|s| matches!(s.status, ConnectionStatus::Disconnected | ConnectionStatus::Error(_)))
+                        {
+                            self.connect_slot(slot_id);
+                        }
+                        self.mark_session_dirty();
+                    }
+                    QuickSwitcherTarget::Schema { slot_id, schema } => {
+                        self.active_slot = Some(slot_id);
+                        self.expanded_servers[slot_id.index()] = true;
+                        self.expanded_schemas
+                            .insert((slot_id.index(), schema.clone()), true);
+                        let needs_l1 = self.catalogs[slot_id.index()].as_ref().is_some_and(|cat| {
+                            cat.schemas()
+                                .iter()
+                                .find(|s| cat.resolve(s.name).eq_ignore_ascii_case(&schema))
+                                .is_some_and(|s| !s.l1_loaded)
+                        });
+                        if needs_l1 {
+                            let activity = &mut self.slot_activity[slot_id.index()];
+                            if !activity.loading_schemas.contains(&schema) {
+                                activity.loading_schemas.insert(schema.clone());
+                                self.hub.send(slot_id, SlotCmd::LoadSchemaL1 { schema });
+                            }
+                        }
+                        self.mark_session_dirty();
+                    }
+                    QuickSwitcherTarget::Table {
+                        slot_id,
+                        schema,
+                        table,
+                    } => {
+                        self.active_slot = Some(slot_id);
+                        self.open_table_tab(slot_id, schema, table);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for CottonDataApp {
@@ -568,7 +900,7 @@ impl eframe::App for CottonDataApp {
             self.persist_sessions_now();
         }
         self.hub.set_egui_ctx(ctx.clone());
-        self.process_worker_events();
+        self.process_worker_events(ctx);
         self.handle_shortcuts(ctx);
         self.flush_debounced_session(ctx);
         self.tick_keepalive(ctx);
@@ -580,6 +912,7 @@ impl eframe::App for CottonDataApp {
         self.render_workspace(ctx, palette);
         self.render_modals(ctx, palette);
         self.render_settings_modal(ctx, palette);
+        self.render_update_and_switcher_overlays(ctx, palette);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -624,5 +957,31 @@ mod tests {
         assert_eq!(err_toast.ttl, Duration::from_secs(10));
         assert!(err_toast.remaining(err_toast.created_at + Duration::from_secs(9)).is_some());
         assert_eq!(err_toast.remaining(err_toast.created_at + Duration::from_secs(11)), None);
+    }
+
+    #[test]
+    fn table_details_cache_enforces_lru_cap_and_slot_purge() {
+        let mut cache = TableDetailsCache::new();
+        let make_detail = |ddl: &str| TableDetail {
+            ddl: ddl.into(),
+            engine: None,
+            collation: None,
+            row_estimate: None,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            inbound_foreign_keys: Vec::new(),
+        };
+        for i in 0..(MAX_TABLE_DETAILS_CACHE + 5) {
+            cache.insert((0, "app".into(), format!("t_{i}")), make_detail(&format!("ddl_{i}")));
+        }
+        assert_eq!(cache.entries.len(), MAX_TABLE_DETAILS_CACHE);
+        assert!(!cache.contains_key(&(0, "app".into(), "t_0".into())));
+        assert!(!cache.contains_key(&(0, "app".into(), "t_4".into())));
+        assert!(cache.contains_key(&(0, "app".into(), "t_5".into())));
+
+        cache.insert((1, "app".into(), "other".into()), make_detail("other"));
+        cache.retain_slot_ne(0);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.contains_key(&(1, "app".into(), "other".into())));
     }
 }

@@ -1,6 +1,7 @@
 use crate::errors::mssql_error;
 use crate::rows::MssqlClient;
 use crate::values::{cell_value, column_text, column_type_label, is_numeric_type};
+use cottondata_core::UNLIMITED_ROWS;
 use cottondata_driver::DbError;
 use cottondata_grid::{CellValue, ColumnMeta, ColumnarPage};
 use futures_util::TryStreamExt;
@@ -25,11 +26,16 @@ fn column_meta(column: &Column) -> ColumnMeta {
 
 pub(crate) async fn read_first_result_set(
     client: &mut MssqlClient,
-    sql: &str,
+    exec_sql: &str,
+    display_sql: &str,
     max_rows: u32,
 ) -> Result<Option<ColumnarPage>, DbError> {
-    let mut stream = client.simple_query(sql).await.map_err(mssql_error)?;
-    let row_cap = max_rows.max(1) as usize;
+    let mut stream = client.simple_query(exec_sql).await.map_err(mssql_error)?;
+    let row_cap = if max_rows == UNLIMITED_ROWS {
+        usize::MAX
+    } else {
+        max_rows.max(1) as usize
+    };
     let mut page: Option<ColumnarPage> = None;
     let mut is_first_set_complete = false;
     let mut row_buffer: Vec<CellValue> = Vec::new();
@@ -37,7 +43,7 @@ pub(crate) async fn read_first_result_set(
         match item {
             QueryItem::Metadata(metadata) if page.is_none() && !metadata.columns().is_empty() => {
                 let columns = metadata.columns().iter().map(column_meta).collect();
-                page = Some(ColumnarPage::new(columns, sql.to_string()));
+                page = Some(ColumnarPage::new(columns, display_sql.to_string()));
             }
             QueryItem::Metadata(_) => is_first_set_complete = page.is_some(),
             QueryItem::Row(row) => {

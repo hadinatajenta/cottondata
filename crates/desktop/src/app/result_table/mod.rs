@@ -5,24 +5,28 @@ use super::query_tab::{InlineCellEditor, InlineCommitMove};
 use super::row_selection::{RowSelectMode, RowSelection};
 use crate::column_glyph::column_type_glyph;
 use crate::theme::Palette;
-use crate::ui_kit::icon;
+use crate::ui_kit::{icon, icon_text};
 pub(super) use cells::{compute_column_widths, compute_single_column_width};
-use cells::{append_text, modified_cell_tooltip, paint_cell, row_badge, single_line_galley};
+use cells::{append_text, modified_cell_tooltip, render_data_cell_with_fk, row_badge, single_line_galley};
 use context_menu::render_cell_context_menu;
 use cottondata_grid::{ColumnarPage, Editability, ExportFormat, SortDirection, StagedMutator};
 use cottondata_introspect::{ForeignKeyInfo, InboundForeignKeyInfo, TableDetail};
-use eframe::egui::{self, text::LayoutJob, Align2, FontId, Rect, Sense, Stroke, Ui};
+use eframe::egui::{self, text::LayoutJob, Align2, FontId, Rect, RichText, Sense, Stroke, Ui};
 
 const ROW_NUMBER_WIDTH: f32 = 56.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 26.0;
 const CELL_PADDING_X: f32 = 8.0;
 const CELL_FONT_SIZE: f32 = 12.0;
+const SORT_ICON_RESERVE: f32 = 18.0;
+const HOVER_PREVIEW_MIN_CHARS: usize = 80;
+const HOVER_PREVIEW_MAX_CHARS: usize = 2000;
 
 pub(super) struct ResultTableView<'a> {
     pub(super) palette: Palette,
     pub(super) tab_id: u64,
     pub(super) page: &'a ColumnarPage,
+    pub(super) visible_rows: Option<&'a [usize]>,
     pub(super) mutator: &'a StagedMutator,
     pub(super) focused_cell: Option<(usize, usize)>,
     pub(super) row_selection: &'a RowSelection,
@@ -135,8 +139,12 @@ pub(super) enum TableAction {
 pub(super) struct ResultTableInteraction {
     pub(super) action: Option<TableAction>,
     pub(super) clicked_header: Option<usize>,
+    pub(super) header_sort_override: Option<(usize, Option<SortDirection>)>,
+    pub(super) autofit_all_columns: bool,
+    pub(super) reset_column_widths: bool,
     pub(super) resized_column: Option<(usize, f32)>,
     pub(super) autofit_column: Option<usize>,
+    pub(super) reached_scroll_bottom: bool,
 }
 
 pub(super) fn render_result_table(
@@ -146,7 +154,11 @@ pub(super) fn render_result_table(
 ) -> ResultTableInteraction {
     let mut interaction = ResultTableInteraction::default();
     let total_width = ROW_NUMBER_WIDTH + view.column_widths.iter().sum::<f32>();
-    let total_rows = view.page.row_count + view.mutator.inserted_rows().len();
+    let visible_page_rows = view.visible_rows.map_or(view.page.row_count, |rows| rows.len());
+    let total_rows = visible_page_rows + view.mutator.inserted_rows().len();
+    let outbound_fk_by_col: Vec<bool> = (0..view.page.columns.len())
+        .map(|col| view.outbound_fk_for_column(col).is_some())
+        .collect();
     let offset_memory_id = egui::Id::new(("result_table_offset_x", view.tab_id));
     let previous_offset_x = ui
         .ctx()
@@ -165,17 +177,38 @@ pub(super) fn render_result_table(
                 paint_header_row(ui, view, total_width, &mut interaction);
             });
 
+        let mut last_rendered_row = 0usize;
         let body = egui::ScrollArea::both()
             .id_salt(("result_table_body", view.tab_id))
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, total_rows, |ui, row_range| {
-                for row in row_range {
-                    if let Some(action) = paint_body_row(ui, view, row, total_width, inline_editor.as_deref_mut()) {
+                last_rendered_row = row_range.end;
+                for visual_row in row_range {
+                    let logical_row = if visual_row < visible_page_rows {
+                        view.visible_rows.map_or(visual_row, |rows| rows[visual_row])
+                    } else {
+                        view.page.row_count + (visual_row - visible_page_rows)
+                    };
+                    if let Some(action) = paint_body_row(
+                        ui,
+                        view,
+                        logical_row,
+                        total_width,
+                        &outbound_fk_by_col,
+                        inline_editor.as_deref_mut(),
+                    ) {
                         interaction.action = Some(action);
                     }
                 }
             });
+
+        const SCROLL_FETCH_THRESHOLD_ROWS: usize = 12;
+        let can_scroll_vertically = body.content_size.y > body.inner_rect.height() + ROW_HEIGHT;
+        interaction.reached_scroll_bottom = total_rows > 0
+            && can_scroll_vertically
+            && body.state.offset.y > 0.0
+            && last_rendered_row.saturating_add(SCROLL_FETCH_THRESHOLD_ROWS) >= total_rows;
 
         let current_offset_x = body.state.offset.x;
         if (current_offset_x - previous_offset_x).abs() > f32::EPSILON {
@@ -246,7 +279,21 @@ fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32, inter
             egui::pos2((cell_rect.right() - 4.0).max(cell_rect.left()), cell_rect.bottom()),
         );
         let response = ui.interact(click_rect, ui.id().with(("header", view.tab_id, column_index)), Sense::click());
-        if response.hovered() && view.is_sortable && !is_resizing {
+        let active_sort_dir = match view.order_by {
+            Some((name, dir))
+                if name.eq_ignore_ascii_case(&column.name)
+                    || name.eq_ignore_ascii_case(column.sql_column_name()) =>
+            {
+                Some(*dir)
+            }
+            _ => None,
+        };
+        let is_hovered = response.hovered() && !is_resizing;
+        if active_sort_dir.is_some() {
+            ui.painter()
+                .rect_filled(cell_rect, 0.0, palette.accent_soft.gamma_multiply(0.45));
+        }
+        if is_hovered && view.is_sortable {
             ui.painter().rect_filled(cell_rect, 0.0, palette.bg_hover);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -255,26 +302,153 @@ fn paint_header_row(ui: &mut Ui, view: &ResultTableView, total_width: f32, inter
         } else {
             (column_type_glyph(&column.type_name), palette.text_muted)
         };
-        let sort_glyph = match view.order_by {
-            Some((name, SortDirection::Asc)) if name == &column.name => icon::SORT_ASCENDING,
-            Some((name, SortDirection::Desc)) if name == &column.name => icon::SORT_DESCENDING,
-            _ => "",
+        let sort_indicator = match active_sort_dir {
+            Some(SortDirection::Desc) => Some((icon::SORT_DESCENDING, palette.accent)),
+            Some(SortDirection::Asc) => Some((icon::SORT_ASCENDING, palette.accent)),
+            None if view.is_sortable && is_hovered => Some((icon::ARROWS_DOWN_UP, palette.text_muted)),
+            None => None,
+        };
+        let sort_reserve = if sort_indicator.is_some() {
+            SORT_ICON_RESERVE
+        } else {
+            0.0
         };
         let mut job = LayoutJob::default();
         let header_font = FontId::proportional(CELL_FONT_SIZE);
         append_text(&mut job, glyph, header_font.clone(), glyph_color, 0.0);
-        append_text(&mut job, &column.name, header_font.clone(), palette.text_primary, 6.0);
-        append_text(&mut job, sort_glyph, header_font, palette.accent, 6.0);
-        let galley = single_line_galley(ui, job, cell_rect.width() - CELL_PADDING_X * 2.0);
+        let name_color = if active_sort_dir.is_some() {
+            palette.accent
+        } else {
+            palette.text_primary
+        };
+        append_text(&mut job, &column.name, header_font, name_color, 6.0);
+        let max_label_w = (cell_rect.width() - CELL_PADDING_X * 2.0 - sort_reserve).max(12.0);
+        let galley = single_line_galley(ui, job, max_label_w);
         let text_pos = egui::pos2(
             cell_rect.left() + CELL_PADDING_X,
             cell_rect.center().y - galley.size().y / 2.0,
         );
-        ui.painter().galley(text_pos, galley, palette.text_primary);
+        ui.painter().galley(text_pos, galley, name_color);
+        if let Some((sort_glyph, sort_color)) = sort_indicator {
+            ui.painter().text(
+                egui::pos2(cell_rect.right() - CELL_PADDING_X - 5.0, cell_rect.center().y),
+                Align2::CENTER_CENTER,
+                sort_glyph,
+                FontId::proportional(12.5),
+                sort_color,
+            );
+        }
+        if active_sort_dir.is_some() {
+            ui.painter().hline(
+                cell_rect.left()..=cell_rect.right(),
+                cell_rect.bottom() - 1.5,
+                Stroke::new(2.0, palette.accent),
+            );
+        }
         if response.clicked() {
             interaction.clicked_header = Some(column_index);
         }
-        response.on_hover_text(format!("{} · Drag right edge to resize", column.type_name));
+        response.context_menu(|ui| {
+            ui.set_min_width(200.0);
+            if view.is_sortable {
+                if ui
+                    .add(
+                        egui::Button::new(icon_text(
+                            icon::SORT_DESCENDING,
+                            palette.accent,
+                            "Sort Descending",
+                            palette.text_primary,
+                            13.0,
+                        ))
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    interaction.header_sort_override = Some((column_index, Some(SortDirection::Desc)));
+                    ui.close_menu();
+                }
+                if ui
+                    .add(
+                        egui::Button::new(icon_text(
+                            icon::SORT_ASCENDING,
+                            palette.accent,
+                            "Sort Ascending",
+                            palette.text_primary,
+                            13.0,
+                        ))
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    interaction.header_sort_override = Some((column_index, Some(SortDirection::Asc)));
+                    ui.close_menu();
+                }
+                if active_sort_dir.is_some()
+                    && ui
+                        .add(
+                            egui::Button::new(icon_text(
+                                icon::X,
+                                palette.text_muted,
+                                "Clear Sort",
+                                palette.text_primary,
+                                13.0,
+                            ))
+                            .frame(false),
+                        )
+                        .clicked()
+                {
+                    interaction.header_sort_override = Some((column_index, None));
+                    ui.close_menu();
+                }
+                ui.separator();
+            }
+            if ui
+                .add(
+                    egui::Button::new(icon_text(
+                        icon::COLUMNS,
+                        palette.text_muted,
+                        "Auto-fit all columns",
+                        palette.text_primary,
+                        13.0,
+                    ))
+                    .frame(false),
+                )
+                .clicked()
+            {
+                interaction.autofit_all_columns = true;
+                ui.close_menu();
+            }
+            if ui
+                .add(
+                    egui::Button::new(icon_text(
+                        icon::ARROW_COUNTER_CLOCKWISE,
+                        palette.text_muted,
+                        "Reset column widths",
+                        palette.text_primary,
+                        13.0,
+                    ))
+                    .frame(false),
+                )
+                .clicked()
+            {
+                interaction.reset_column_widths = true;
+                ui.close_menu();
+            }
+        });
+        let hover_tip = if view.is_sortable {
+            match active_sort_dir {
+                None => format!("{} · Click to sort descending · Drag right edge to resize", column.type_name),
+                Some(SortDirection::Desc) => {
+                    format!("{} · Sorted DESC — click for ascending · Drag right edge to resize", column.type_name)
+                }
+                Some(SortDirection::Asc) => {
+                    format!("{} · Sorted ASC — click to reset order · Drag right edge to resize", column.type_name)
+                }
+            }
+        } else {
+            format!("{} · Drag right edge to resize", column.type_name)
+        };
+        response.on_hover_text(hover_tip);
     }
 
     paint_grid_lines(ui, view, row_rect);
@@ -293,6 +467,7 @@ fn paint_body_row(
     view: &ResultTableView,
     row: usize,
     total_width: f32,
+    outbound_fk_by_col: &[bool],
     mut inline_editor: Option<&mut InlineCellEditor>,
 ) -> Option<TableAction> {
     let palette = view.palette;
@@ -344,18 +519,42 @@ fn paint_body_row(
             }
             continue;
         }
-        paint_cell(ui, view, row, column_index, cell_rect, row_highlight.is_some());
+        let has_col_fk = outbound_fk_by_col.get(column_index).copied().unwrap_or(false);
+        render_data_cell_with_fk(
+            ui,
+            view,
+            row,
+            column_index,
+            cell_rect,
+            row_highlight.is_some(),
+            has_col_fk,
+        );
         let response = ui.interact(cell_rect, ui.id().with(("cell", row, column_index)), Sense::click());
         if let Some(cell_action) = cell_response_action(ui, view, &response, row, column_index) {
             action = Some(cell_action);
         }
         if let Some(tooltip) = modified_cell_tooltip(view, row, column_index) {
             response.clone().on_hover_text(tooltip);
-        } else if row < view.page.row_count && view.page.cell_str(row, column_index).is_some() {
+        } else if has_col_fk && row < view.page.row_count && view.page.cell_str(row, column_index).is_some() {
             if let Some(fk) = view.outbound_fk_for_column(column_index) {
                 response
                     .clone()
                     .on_hover_text(format!("FK → {}.{} · Cmd+Click to open", fk.ref_table, fk.ref_column));
+            }
+        } else if row < view.page.row_count {
+            if let Some(raw) = view.page.cell_str(row, column_index) {
+                if needs_hover_preview(raw) {
+                    response.clone().on_hover_ui(|ui| {
+                        ui.set_max_width(480.0);
+                        let preview = format_cell_hover_preview(raw);
+                        ui.label(
+                            RichText::new(preview)
+                                .monospace()
+                                .size(11.5)
+                                .color(palette.text_primary),
+                        );
+                    });
+                }
             }
         }
         response.context_menu(|ui| {
@@ -372,6 +571,36 @@ fn paint_body_row(
         Stroke::new(1.0, palette.divider),
     );
     action
+}
+
+fn needs_hover_preview(raw: &str) -> bool {
+    if raw.len() > HOVER_PREVIEW_MIN_CHARS || raw.contains('\n') {
+        return true;
+    }
+    let trimmed = raw.trim();
+    (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+}
+
+fn format_cell_hover_preview(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let candidate = if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|val| serde_json::to_string_pretty(&val).ok())
+            .unwrap_or_else(|| raw.to_string())
+    } else {
+        raw.to_string()
+    };
+    let mut chars = candidate.chars();
+    let head: String = chars.by_ref().take(HOVER_PREVIEW_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 fn render_inline_cell_editor(

@@ -4,13 +4,15 @@ use crate::introspection;
 use crate::monitoring;
 use crate::results::{read_first_result_set, stream_first_result_set};
 use crate::rows::{int, optional_text, MssqlClient};
-use cottondata_core::{ServerProfile, ServerRuntimeInfo, SqlDialect};
+use cottondata_core::{ServerProfile, ServerRuntimeInfo, SqlDialect, UNLIMITED_ROWS};
 use cottondata_driver::{
     resolve_tcp_target, DatabaseSession, DbError, ExplainResult, ProcessEntry, QueryOutcome, SchemaObjects,
     SchemaSummary, ServerHealthMetrics, SshTunnel, TableDetail,
 };
 use cottondata_grid::ColumnMeta;
-use cottondata_sql::{analyze_statement, WriteClass};
+use cottondata_sql::{
+    analyze_statement, has_explicit_row_limit, is_pageable_read_query, strip_trailing_terminator, WriteClass,
+};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
@@ -148,8 +150,30 @@ impl DatabaseSession for MssqlSession {
         let page = if is_write {
             None
         } else {
-            let Self { executor, client, .. } = self;
-            executor.block_on(read_first_result_set(client, sql, max_rows))?
+            let apply_rowcount =
+                max_rows != UNLIMITED_ROWS && is_pageable_read_query(sql) && !has_explicit_row_limit(sql);
+            let exec_sql = if apply_rowcount {
+                let server_cap = u64::from(max_rows.max(1)).saturating_add(1);
+                format!(
+                    "SET ROWCOUNT {server_cap};\n{}\n;SET ROWCOUNT 0;",
+                    strip_trailing_terminator(sql)
+                )
+            } else {
+                sql.to_string()
+            };
+            let result = {
+                let Self { executor, client, .. } = self;
+                executor.block_on(read_first_result_set(client, &exec_sql, sql, max_rows))
+            };
+            match result {
+                Ok(page) => page,
+                Err(err) => {
+                    if apply_rowcount {
+                        let _ = self.run_command("SET ROWCOUNT 0");
+                    }
+                    return Err(err);
+                }
+            }
         };
         let affected_rows = if is_write { self.run_command(sql)? } else { 0 };
         self.refresh_session_state();

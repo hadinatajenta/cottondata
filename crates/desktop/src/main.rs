@@ -5,6 +5,7 @@ mod column_glyph;
 mod drivers;
 mod theme;
 mod ui_kit;
+mod updater;
 mod worker;
 
 use eframe::egui;
@@ -13,9 +14,18 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[cfg(target_os = "macos")]
-const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../assets/AppIcon-512.png");
-#[cfg(not(target_os = "macos"))]
+extern "C" {
+    fn mi_collect(force: bool);
+}
+
+pub(crate) fn purge_unused_memory() {
+    // SAFETY: `mi_collect` is an exported, thread-safe mimalloc C API function
+    // linked via the global `MiMalloc` allocator.
+    unsafe {
+        mi_collect(true);
+    }
+}
+
 const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../assets/AppIcon-256.png");
 
 #[cfg(target_os = "macos")]
@@ -50,6 +60,7 @@ fn load_window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    updater::cleanup_stale_old_binaries();
     drivers::install_tls_crypto_provider();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("CottonData")

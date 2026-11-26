@@ -1,9 +1,10 @@
 use crate::errors::postgres_error_for;
 use crate::metadata::MetadataCache;
 use crate::values::display_text;
+use cottondata_core::{SqlDialect, UNLIMITED_ROWS};
 use cottondata_driver::DbError;
 use cottondata_grid::{CellValue, ColumnMeta, ColumnarPage};
-use cottondata_sql::{tokenize, TokenKind};
+use cottondata_sql::{build_paginated_query, has_explicit_row_limit, tokenize, TokenKind};
 use futures_util::{pin_mut, TryStreamExt};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
@@ -89,22 +90,32 @@ pub(crate) async fn execute_statement(
     options: &ExecutionOptions<'_>,
 ) -> Result<ExecutionResult, DbError> {
     let max_rows = options.max_rows;
+    let unlimited = max_rows == UNLIMITED_ROWS;
     let prepared = client.prepare(sql).await.ok();
     let Some(statement) = prepared.filter(|statement| !statement.columns().is_empty()) else {
-        return run_simple(client, sql, max_rows, None, None, None).await;
+        return run_simple(client, sql, sql, max_rows, None, None, None).await;
     };
     let metas = cache.describe_columns(client, statement.columns()).await;
     let types: Vec<Type> = statement.columns().iter().map(|column| column.type_().clone()).collect();
     let is_plain_read = is_cursor_compatible(sql);
-    if options.is_cursor_supported && is_plain_read {
+    if !unlimited && options.is_cursor_supported && is_plain_read {
         let page = fetch_through_cursor(client, sql, max_rows, options.is_in_transaction, metas, &types).await?;
         return Ok(ExecutionResult {
             page: Some(page),
             affected_rows: 0,
         });
     }
-    let overflow_canceller = options.overflow_canceller.filter(|_| is_plain_read);
-    run_simple(client, sql, max_rows, Some(metas), Some(&types), overflow_canceller).await
+    if !unlimited && !options.is_cursor_supported && is_plain_read && !has_explicit_row_limit(sql) {
+        let fetch_limit = max_rows.max(1).saturating_add(1);
+        if let Some(limited_sql) = build_paginated_query(SqlDialect::CockroachDb, sql, fetch_limit, 0) {
+            return run_simple(client, &limited_sql, sql, max_rows, Some(metas), Some(&types), None).await;
+        }
+    }
+    let overflow_canceller = (!unlimited)
+        .then_some(options.overflow_canceller)
+        .flatten()
+        .filter(|_| is_plain_read);
+    run_simple(client, sql, sql, max_rows, Some(metas), Some(&types), overflow_canceller).await
 }
 
 async fn fetch_through_cursor(
@@ -148,17 +159,22 @@ async fn fetch_through_cursor(
 
 async fn run_simple(
     client: &Client,
-    sql: &str,
+    exec_sql: &str,
+    display_sql: &str,
     max_rows: u32,
     metas: Option<Vec<ColumnMeta>>,
     types: Option<&[Type]>,
     overflow_canceller: Option<&OverflowCanceller>,
 ) -> Result<ExecutionResult, DbError> {
-    let row_cap = max_rows.max(1) as usize;
+    let row_cap = if max_rows == UNLIMITED_ROWS {
+        usize::MAX
+    } else {
+        max_rows.max(1) as usize
+    };
     let stream = client
-        .simple_query_raw(sql)
+        .simple_query_raw(exec_sql)
         .await
-        .map_err(|error| postgres_error_for(error, Some(sql)))?;
+        .map_err(|error| postgres_error_for(error, Some(display_sql)))?;
     pin_mut!(stream);
     let mut overflow_cancel_thread: Option<std::thread::JoinHandle<()>> = None;
     let mut prepared_metas = metas;
@@ -176,7 +192,7 @@ async fn run_simple(
                 if let Some(thread) = overflow_cancel_thread.take() {
                     let _ = thread.join();
                 }
-                return Err(postgres_error_for(error, Some(sql)));
+                return Err(postgres_error_for(error, Some(display_sql)));
             }
         };
         match message {
@@ -185,7 +201,7 @@ async fn run_simple(
                     .take()
                     .filter(|metas| metas.len() == columns.len())
                     .unwrap_or_else(|| columns.iter().map(|column| text_column_meta(column.name())).collect());
-                page = Some(ColumnarPage::new(metas, sql.to_string()));
+                page = Some(ColumnarPage::new(metas, display_sql.to_string()));
             }
             SimpleQueryMessage::RowDescription(_) => {}
             SimpleQueryMessage::Row(row) => {

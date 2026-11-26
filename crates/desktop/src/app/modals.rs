@@ -1,4 +1,4 @@
-use super::server_form::{ConnectionTestState, ServerFormTab, ServerModalState};
+use super::server_form::{ConnectionTestState, ServerFormTab, ServerModalState, ENV_COLOR_SWATCHES};
 use super::CottonDataApp;
 use crate::theme::{highlight_mysql_editor_layout, Palette};
 use crate::ui_kit::{
@@ -7,7 +7,7 @@ use crate::ui_kit::{
     toggle_card, ModalConfig,
 };
 use crate::worker::SlotCmd;
-use cottondata_core::{DatabaseEngine, EnvironmentTag, TlsMode};
+use cottondata_core::{DatabaseEngine, EnvironmentTag, TlsMode, MAX_ENVIRONMENT_LABEL_CHARS};
 use eframe::egui::{self, Color32, RichText};
 
 impl CottonDataApp {
@@ -112,14 +112,29 @@ impl CottonDataApp {
             return;
         };
         let active_slot = self.tabs[self.active_tab_idx].slot.or(self.active_slot);
-        let server_info = active_slot
-            .and_then(|slot| self.registry.get(slot))
-            .map(|s| (format!("{} {}", s.slot_id, s.profile.name), s.profile.environment));
-        let is_prod = server_info
-            .as_ref()
-            .is_some_and(|(_, env)| *env == EnvironmentTag::Production);
+        let server_info = active_slot.and_then(|slot| {
+            let s = self.registry.get(slot)?;
+            let display_num = self
+                .registry
+                .display_number_of(slot)
+                .unwrap_or_else(|| slot.display_number());
+            Some((
+                format!("#{display_num} {}", s.profile.name),
+                s.profile.env_display_label().to_string(),
+                s.profile.env_display_rgb(),
+                s.profile.is_production(),
+            ))
+        });
+        let is_prod = server_info.as_ref().is_some_and(|(_, _, _, prod)| *prod);
+        let modal_accent = if is_prod {
+            p.danger
+        } else if let Some((_, _, [r, g, b], _)) = &server_info {
+            Color32::from_rgb(*r, *g, *b)
+        } else {
+            p.accent
+        };
         let subtitle = match &server_info {
-            Some((name, _)) => format!("{} statement(s) · {name}", statements.len()),
+            Some((name, env_label, _, _)) => format!("{} statement(s) · {name} [{env_label}]", statements.len()),
             None => format!("{} statement(s)", statements.len()),
         };
 
@@ -132,10 +147,10 @@ impl CottonDataApp {
             ModalConfig {
                 id: "sql_preview_modal",
                 icon_glyph: icon::CODE,
-                icon_color: if is_prod { p.danger } else { p.accent },
+                icon_color: modal_accent,
                 title: "Preview Staged Transaction",
                 subtitle: Some(&subtitle),
-                accent_bar: Some(if is_prod { p.danger } else { p.accent }),
+                accent_bar: Some(modal_accent),
                 width: 660.0,
                 max_height: None,
                 dismiss_on_backdrop: false,
@@ -216,10 +231,14 @@ impl CottonDataApp {
         let mut save_clicked = false;
         let mut test_clicked = false;
 
-        let [er, eg, eb] = state.environment.rgb();
+        let [er, eg, eb] = state.preview_rgb();
         let env_color = Color32::from_rgb(er, eg, eb);
         let title = if let Some(slot) = state.editing_slot {
-            format!("Edit Connection ({slot})")
+            let display_num = self
+                .registry
+                .display_number_of(slot)
+                .unwrap_or_else(|| slot.display_number());
+            format!("Edit Connection (#{display_num})")
         } else {
             format!(
                 "New Connection (Slot {}/{})",
@@ -425,7 +444,11 @@ impl CottonDataApp {
                             if let Err(err) = self.storage.save_registry(&self.registry) {
                                 self.notify_error(format!("Could not save server list: {err}"));
                             } else {
-                                self.notify_success(format!("Saved server {slot_id} {saved_name}"));
+                                let display_num = self
+                                    .registry
+                                    .display_number_of(slot_id)
+                                    .unwrap_or_else(|| slot_id.display_number());
+                                self.notify_success(format!("Saved server #{display_num} {saved_name}"));
                             }
                             self.active_slot = Some(slot_id);
                             keep_open = false;
@@ -470,7 +493,7 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
     }
 
     ui.add_space(14.0);
-    let name_w = (full_w - gap) * 0.56;
+    let name_w = (full_w - gap) * 0.44;
     let env_w = full_w - gap - name_w;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
@@ -485,21 +508,39 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                 for env in [
-                    EnvironmentTag::Local,
-                    EnvironmentTag::Development,
-                    EnvironmentTag::Staging,
                     EnvironmentTag::Production,
+                    EnvironmentTag::Staging,
+                    EnvironmentTag::Development,
+                    EnvironmentTag::Local,
                 ] {
                     let [r, g, b] = env.rgb();
-                    if env_pill_button(ui, p, env.label(), Color32::from_rgb(r, g, b), state.environment == env)
-                        .clicked()
-                    {
+                    let selected = !state.custom_env_mode && state.environment == env;
+                    if env_pill_button(ui, p, env.label(), Color32::from_rgb(r, g, b), selected).clicked() {
+                        state.custom_env_mode = false;
                         state.environment = env;
+                        state.production_guard = matches!(env, EnvironmentTag::Production);
                     }
+                }
+                let [cr, cg, cb] = state.environment_color;
+                if env_pill_button(
+                    ui,
+                    p,
+                    "CUSTOM",
+                    Color32::from_rgb(cr, cg, cb),
+                    state.custom_env_mode,
+                )
+                .clicked()
+                {
+                    state.custom_env_mode = true;
                 }
             });
         });
     });
+
+    if state.custom_env_mode {
+        ui.add_space(10.0);
+        render_custom_environment_editor(ui, p, state);
+    }
 
     ui.add_space(12.0);
     if state.engine.is_file_based() {
@@ -596,6 +637,87 @@ fn render_general_tab(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalStat
             };
             ui.checkbox(&mut state.save_in_keychain, vault_label);
         });
+    });
+}
+
+fn render_custom_environment_editor(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalState) {
+    let [cr, cg, cb] = state.environment_color;
+    let active_color = Color32::from_rgb(cr, cg, cb);
+
+    inset_frame(p).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        let inner_w = ui.available_width();
+        let char_count = state.environment_label.trim().chars().count();
+        let over_limit = char_count > MAX_ENVIRONMENT_LABEL_CHARS;
+
+        ui.horizontal(|ui| {
+            field_label(ui, p, "Custom Environment Label");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let count_color = if over_limit { p.danger } else { p.text_muted };
+                ui.label(
+                    RichText::new(format!("{char_count}/{MAX_ENVIRONMENT_LABEL_CHARS}"))
+                        .size(11.0)
+                        .color(count_color),
+                );
+            });
+        });
+
+        ui.horizontal(|ui| {
+            let input_w = (inner_w - 130.0).max(180.0);
+            styled_text_input(
+                ui,
+                p,
+                "srv_custom_env_label",
+                &mut state.environment_label,
+                "QA, UAT, DR, Sandbox, Client A",
+                input_w,
+            );
+            ui.add_space(6.0);
+            pill(ui, state.preview_label(), active_color);
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Badge Color").size(11.5).strong().color(p.text_muted));
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for &(swatch_name, rgb) in ENV_COLOR_SWATCHES {
+                let swatch_color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                let is_selected = state.environment_color == rgb;
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                let resp = resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(swatch_name);
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    let center = rect.center();
+                    if is_selected {
+                        painter.circle_stroke(center, 10.0, egui::Stroke::new(2.0, p.text_primary));
+                        painter.circle_filled(center, 7.5, swatch_color);
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            icon::CHECK,
+                            egui::FontId::proportional(10.0),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        let radius = if resp.hovered() { 9.0 } else { 8.0 };
+                        painter.circle_filled(center, radius, swatch_color);
+                    }
+                }
+                if resp.clicked() {
+                    state.environment_color = rgb;
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut state.production_guard,
+            "Production safety guard (confirm before writes)",
+        )
+        .on_hover_text("Require SQL preview confirmation before committing edits or schema changes");
     });
 }
 
@@ -733,10 +855,11 @@ fn render_safety_section(ui: &mut egui::Ui, p: Palette, state: &mut ServerModalS
             p,
             &mut state.page_size,
             &[
-                (100u32, "", "100"),
+                (50u32, "", "50"),
+                (100, "", "100"),
+                (200, "", "200"),
                 (500, "", "500"),
                 (1000, "", "1,000"),
-                (2000, "", "2,000"),
             ],
         );
         caption(ui, p, "rows / page");

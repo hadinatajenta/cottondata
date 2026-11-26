@@ -227,30 +227,183 @@ const UI_FONT_NAME: &str = "inter";
 const UI_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
 const CODE_FONT_NAME: &str = "jetbrains_mono";
 const CODE_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+const PHOSPHOR_FONT_NAME: &str = "phosphor";
+const PHOSPHOR_FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Phosphor-Subset.ttf");
 
-pub fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    register_primary_font(&mut fonts, FontFamily::Proportional, UI_FONT_NAME, UI_FONT_BYTES);
-    register_primary_font(&mut fonts, FontFamily::Monospace, CODE_FONT_NAME, CODE_FONT_BYTES);
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ctx.set_fonts(fonts);
-}
-
-fn register_primary_font(
-    fonts: &mut egui::FontDefinitions,
-    family: FontFamily,
-    font_name: &str,
-    font_bytes: &'static [u8],
-) {
+pub fn build_font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::empty();
     fonts.font_data.insert(
-        font_name.to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(font_bytes)),
+        UI_FONT_NAME.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(UI_FONT_BYTES)),
+    );
+    fonts.font_data.insert(
+        CODE_FONT_NAME.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(CODE_FONT_BYTES)),
+    );
+    fonts.font_data.insert(
+        PHOSPHOR_FONT_NAME.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(PHOSPHOR_FONT_BYTES)),
+    );
+    fonts.families.insert(
+        FontFamily::Proportional,
+        vec![
+            UI_FONT_NAME.to_owned(),
+            PHOSPHOR_FONT_NAME.to_owned(),
+            CODE_FONT_NAME.to_owned(),
+        ],
+    );
+    fonts.families.insert(
+        FontFamily::Monospace,
+        vec![
+            CODE_FONT_NAME.to_owned(),
+            PHOSPHOR_FONT_NAME.to_owned(),
+            UI_FONT_NAME.to_owned(),
+        ],
     );
     fonts
-        .families
-        .entry(family)
-        .or_default()
-        .insert(0, font_name.to_owned());
+}
+
+pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(build_font_definitions());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlHighlightKey {
+    sql_hash: u64,
+    sql_len: usize,
+    wrap_width_bits: u32,
+    is_dark: bool,
+    matches_hash: u64,
+    pixels_per_point_bits: u32,
+}
+
+impl SqlHighlightKey {
+    fn compute(
+        text: &str,
+        wrap_width: f32,
+        palette: Palette,
+        matches: &[(usize, usize)],
+        active_match: Option<usize>,
+        pixels_per_point: f32,
+    ) -> Self {
+        Self {
+            sql_hash: fnv1a64(text.as_bytes()),
+            sql_len: text.len(),
+            wrap_width_bits: wrap_width.to_bits(),
+            is_dark: palette.bg_card.r() < 128,
+            matches_hash: hash_matches(matches, active_match),
+            pixels_per_point_bits: pixels_per_point.to_bits(),
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct SqlHighlightCache {
+    key: Option<SqlHighlightKey>,
+    galley: Option<std::sync::Arc<egui::Galley>>,
+}
+
+#[allow(dead_code)]
+impl SqlHighlightCache {
+    pub fn layout(
+        &mut self,
+        ui: &egui::Ui,
+        text: &str,
+        wrap_width: f32,
+        palette: Palette,
+        matches: &[(usize, usize)],
+        active_match: Option<usize>,
+    ) -> std::sync::Arc<egui::Galley> {
+        let key = SqlHighlightKey::compute(
+            text,
+            wrap_width,
+            palette,
+            matches,
+            active_match,
+            ui.ctx().pixels_per_point(),
+        );
+        if self.key.as_ref() == Some(&key) {
+            if let Some(galley) = &self.galley {
+                if galley.text() == text {
+                    return std::sync::Arc::clone(galley);
+                }
+            }
+        }
+        let galley = build_mysql_layout(ui, text, wrap_width, palette, matches, active_match);
+        self.key = Some(key);
+        self.galley = Some(std::sync::Arc::clone(&galley));
+        galley
+    }
+
+    pub fn layout_editor(
+        &mut self,
+        ui: &egui::Ui,
+        text: &str,
+        palette: Palette,
+        matches: &[(usize, usize)],
+        active_match: Option<usize>,
+    ) -> std::sync::Arc<egui::Galley> {
+        self.layout(ui, text, f32::INFINITY, palette, matches, active_match)
+    }
+
+    pub fn invalidate(&mut self) {
+        self.key = None;
+        self.galley = None;
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn hash_matches(matches: &[(usize, usize)], active_match: Option<usize>) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    let mut feed = |v: u64| {
+        for b in v.to_le_bytes() {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    feed(matches.len() as u64);
+    match active_match {
+        Some(idx) => {
+            feed(1);
+            feed(idx as u64);
+        }
+        None => feed(0),
+    }
+    for &(start, end) in matches {
+        feed(start as u64);
+        feed(end as u64);
+    }
+    hash
+}
+
+#[allow(dead_code)]
+pub fn highlight_mysql_editor_cached(
+    ui: &egui::Ui,
+    cache_id: egui::Id,
+    text: &str,
+    palette: Palette,
+    matches: &[(usize, usize)],
+    active_match: Option<usize>,
+) -> std::sync::Arc<egui::Galley> {
+    let mut cache = ui
+        .ctx()
+        .data(|data| data.get_temp::<SqlHighlightCache>(cache_id))
+        .unwrap_or_default();
+    let galley = cache.layout_editor(ui, text, palette, matches, active_match);
+    ui.ctx().data_mut(|data| data.insert_temp(cache_id, cache));
+    galley
 }
 
 pub fn highlight_mysql_layout(
@@ -268,16 +421,6 @@ pub fn highlight_mysql_editor_layout(
     palette: Palette,
 ) -> std::sync::Arc<egui::Galley> {
     build_mysql_layout(ui, text, f32::INFINITY, palette, &[], None)
-}
-
-pub fn highlight_mysql_editor_with_matches(
-    ui: &egui::Ui,
-    text: &str,
-    palette: Palette,
-    matches: &[(usize, usize)],
-    active_match: Option<usize>,
-) -> std::sync::Arc<egui::Galley> {
-    build_mysql_layout(ui, text, f32::INFINITY, palette, matches, active_match)
 }
 
 fn build_mysql_layout(
@@ -427,5 +570,289 @@ mod tests {
             }
             assert!(fonts.has_glyphs(&font_id, "Server 4/10 settings"));
         }
+    }
+
+    #[test]
+    fn ui_glyphs_present_without_default_fonts() {
+        let definitions = build_font_definitions();
+        assert_eq!(definitions.font_data.len(), 3);
+        let fonts = egui::epaint::text::Fonts::new(1.0, 2048, definitions);
+
+        let special_ui_glyphs = "↑↓←→⌘⌥⇧…·•×—–✓↵─└";
+        let key_icons = [
+            icon::DATABASE,
+            icon::TABLE,
+            icon::GEAR_SIX,
+            icon::ARROW_CIRCLE_UP,
+            icon::DOTS_SIX_VERTICAL,
+            icon::SORT_ASCENDING,
+            icon::SORT_DESCENDING,
+            icon::ARROWS_DOWN_UP,
+            icon::FUNNEL,
+            icon::MAGNIFYING_GLASS,
+            icon::COPY,
+            icon::ARROW_CLOCKWISE,
+            icon::CHECK,
+            icon::X,
+            icon::WARNING,
+            icon::INFO,
+            icon::DOWNLOAD_SIMPLE,
+            icon::ARROW_SQUARE_OUT,
+            icon::SHIELD_CHECK,
+            icon::SPARKLE,
+            icon::PLAY,
+            icon::STOP,
+            icon::KEY,
+            icon::LIGHTNING,
+            icon::FLOPPY_DISK,
+        ];
+
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            let font_id = FontId::new(13.0, family.clone());
+            let supported = fonts.lock().fonts.font(&font_id).characters().clone();
+            for ch in ' '..='~' {
+                assert!(
+                    supported.contains_key(&ch),
+                    "missing ASCII glyph {ch:?} (U+{:04X}) in {family:?} without default_fonts",
+                    ch as u32
+                );
+                if ch != '?' {
+                    assert!(
+                        fonts.has_glyph(&font_id, ch),
+                        "epaint fell back on ASCII glyph {ch:?} (U+{:04X}) in {family:?}",
+                        ch as u32
+                    );
+                }
+            }
+            for ch in special_ui_glyphs.chars() {
+                assert!(
+                    supported.contains_key(&ch) && fonts.has_glyph(&font_id, ch),
+                    "missing UI glyph {ch:?} (U+{:04X}) in {family:?} without default_fonts",
+                    ch as u32
+                );
+            }
+            for glyph in key_icons {
+                let cp = glyph.chars().next().expect("icon codepoint");
+                assert!(
+                    supported.contains_key(&cp) && fonts.has_glyph(&font_id, cp),
+                    "missing Phosphor icon U+{:04X} in {family:?} without default_fonts",
+                    cp as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn phosphor_subset_covers_all_used_icons() {
+        let phosphor_fonts = fonts_with_only(PHOSPHOR_FONT_NAME, PHOSPHOR_FONT_BYTES);
+        let font_id = FontId::new(13.0, FontFamily::Proportional);
+
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let used_icon_names = collect_icon_names_in_dir(&src_dir);
+        assert!(
+            !used_icon_names.is_empty(),
+            "expected to discover icon::* usages under {}",
+            src_dir.display()
+        );
+
+        let mut missing = Vec::new();
+        for name in used_icon_names {
+            let Some(cp) = lookup_phosphor_codepoint(&name) else {
+                missing.push(format!(
+                    "{name} (not in verified subset table — run `python3 scripts/subset-phosphor.py` and register in theme.rs test)"
+                ));
+                continue;
+            };
+            if !phosphor_fonts.has_glyph(&font_id, cp) {
+                missing.push(format!(
+                    "{name} (U+{:04X} missing from assets/fonts/Phosphor-Subset.ttf — run `python3 scripts/subset-phosphor.py`)",
+                    cp as u32
+                ));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "Phosphor-Subset.ttf is missing used icon(s):\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn sql_highlight_cache_key_distinguishes_inputs() {
+        let light = AppTheme::Light.palette();
+        let dark = AppTheme::Dark.palette();
+        let k1 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 2.0);
+        let k2 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 2.0);
+        assert_eq!(k1, k2);
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 2", f32::INFINITY, light, &[], None, 2.0)
+        );
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 1", 400.0, light, &[], None, 2.0)
+        );
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, dark, &[], None, 2.0)
+        );
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[(0, 6)], Some(0), 2.0)
+        );
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 1.0)
+        );
+    }
+
+    fn collect_icon_names_in_dir(root: &std::path::Path) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        extract_icon_names(&contents, &mut names);
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    fn extract_icon_names(src: &str, out: &mut std::collections::BTreeSet<String>) {
+        let bytes = src.as_bytes();
+        let needle = b"icon::";
+        let mut i = 0;
+        while i + needle.len() < bytes.len() {
+            if &bytes[i..i + needle.len()] == needle {
+                let prev_is_ident = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                if !prev_is_ident {
+                    let start = i + needle.len();
+                    let mut end = start;
+                    while end < bytes.len()
+                        && (bytes[end].is_ascii_uppercase()
+                            || bytes[end].is_ascii_digit()
+                            || bytes[end] == b'_')
+                    {
+                        end += 1;
+                    }
+                    if end > start {
+                        let name = &src[start..end];
+                        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                            out.insert(name.to_string());
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    fn lookup_phosphor_codepoint(name: &str) -> Option<char> {
+        let glyph = match name {
+            "ARROWS_CLOCKWISE" => icon::ARROWS_CLOCKWISE,
+            "ARROWS_DOWN_UP" => icon::ARROWS_DOWN_UP,
+            "ARROW_CIRCLE_UP" => icon::ARROW_CIRCLE_UP,
+            "ARROW_CLOCKWISE" => icon::ARROW_CLOCKWISE,
+            "ARROW_COUNTER_CLOCKWISE" => icon::ARROW_COUNTER_CLOCKWISE,
+            "ARROW_DOWN" => icon::ARROW_DOWN,
+            "ARROW_RIGHT" => icon::ARROW_RIGHT,
+            "ARROW_SQUARE_OUT" => icon::ARROW_SQUARE_OUT,
+            "ARROW_UP" => icon::ARROW_UP,
+            "ARROW_U_UP_LEFT" => icon::ARROW_U_UP_LEFT,
+            "AT" => icon::AT,
+            "BINARY" => icon::BINARY,
+            "BOOKMARK_SIMPLE" => icon::BOOKMARK_SIMPLE,
+            "BRACKETS_CURLY" => icon::BRACKETS_CURLY,
+            "CALENDAR_BLANK" => icon::CALENDAR_BLANK,
+            "CARET_DOWN" => icon::CARET_DOWN,
+            "CARET_LEFT" => icon::CARET_LEFT,
+            "CARET_RIGHT" => icon::CARET_RIGHT,
+            "CARET_UP" => icon::CARET_UP,
+            "CHART_BAR" => icon::CHART_BAR,
+            "CHECK" => icon::CHECK,
+            "CHECK_CIRCLE" => icon::CHECK_CIRCLE,
+            "CLOCK" => icon::CLOCK,
+            "CLOCK_COUNTER_CLOCKWISE" => icon::CLOCK_COUNTER_CLOCKWISE,
+            "CLOUD" => icon::CLOUD,
+            "CODE" => icon::CODE,
+            "COLUMNS" => icon::COLUMNS,
+            "COPY" => icon::COPY,
+            "DATABASE" => icon::DATABASE,
+            "DOTS_SIX_VERTICAL" => icon::DOTS_SIX_VERTICAL,
+            "DOWNLOAD_SIMPLE" => icon::DOWNLOAD_SIMPLE,
+            "EXPORT" => icon::EXPORT,
+            "EYE" => icon::EYE,
+            "EYE_SLASH" => icon::EYE_SLASH,
+            "FAST_FORWARD" => icon::FAST_FORWARD,
+            "FILE" => icon::FILE,
+            "FILE_PLUS" => icon::FILE_PLUS,
+            "FLOPPY_DISK" => icon::FLOPPY_DISK,
+            "FLOW_ARROW" => icon::FLOW_ARROW,
+            "FOLDER" => icon::FOLDER,
+            "FOLDER_OPEN" => icon::FOLDER_OPEN,
+            "FUNCTION" => icon::FUNCTION,
+            "FUNNEL" => icon::FUNNEL,
+            "GAUGE" => icon::GAUGE,
+            "GEAR" => icon::GEAR,
+            "GEAR_SIX" => icon::GEAR_SIX,
+            "GLOBE" => icon::GLOBE,
+            "HAND_PALM" => icon::HAND_PALM,
+            "HASH" => icon::HASH,
+            "INFO" => icon::INFO,
+            "KEY" => icon::KEY,
+            "LIGHTNING" => icon::LIGHTNING,
+            "LINK" => icon::LINK,
+            "LIST" => icon::LIST,
+            "LIST_BULLETS" => icon::LIST_BULLETS,
+            "LOCK_KEY" => icon::LOCK_KEY,
+            "MAGIC_WAND" => icon::MAGIC_WAND,
+            "MAGNIFYING_GLASS" => icon::MAGNIFYING_GLASS,
+            "MEMORY" => icon::MEMORY,
+            "MINUS" => icon::MINUS,
+            "MOON" => icon::MOON,
+            "PALETTE" => icon::PALETTE,
+            "PENCIL_SIMPLE" => icon::PENCIL_SIMPLE,
+            "PLAY" => icon::PLAY,
+            "PLUG" => icon::PLUG,
+            "PLUGS_CONNECTED" => icon::PLUGS_CONNECTED,
+            "PLUS" => icon::PLUS,
+            "PUSH_PIN" => icon::PUSH_PIN,
+            "ROWS" => icon::ROWS,
+            "SELECTION" => icon::SELECTION,
+            "SHIELD_CHECK" => icon::SHIELD_CHECK,
+            "SLIDERS" => icon::SLIDERS,
+            "SORT_ASCENDING" => icon::SORT_ASCENDING,
+            "SORT_DESCENDING" => icon::SORT_DESCENDING,
+            "SPARKLE" => icon::SPARKLE,
+            "SQUARES_FOUR" => icon::SQUARES_FOUR,
+            "STACK" => icon::STACK,
+            "STOP" => icon::STOP,
+            "SUN" => icon::SUN,
+            "TABLE" => icon::TABLE,
+            "TAG" => icon::TAG,
+            "TERMINAL_WINDOW" => icon::TERMINAL_WINDOW,
+            "TEXT_AA" => icon::TEXT_AA,
+            "TEXT_T" => icon::TEXT_T,
+            "TOGGLE_LEFT" => icon::TOGGLE_LEFT,
+            "TRASH" => icon::TRASH,
+            "TREE_STRUCTURE" => icon::TREE_STRUCTURE,
+            "UPLOAD_SIMPLE" => icon::UPLOAD_SIMPLE,
+            "WARNING" => icon::WARNING,
+            "X" => icon::X,
+            "X_CIRCLE" => icon::X_CIRCLE,
+            _ => return None,
+        };
+        glyph.chars().next()
     }
 }

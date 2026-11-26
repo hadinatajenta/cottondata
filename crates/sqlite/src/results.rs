@@ -1,5 +1,6 @@
 use crate::errors::sqlite_error;
 use crate::values::{is_binary_declared_type, is_numeric_declared_type, type_label, value_text};
+use cottondata_core::UNLIMITED_ROWS;
 use cottondata_driver::{DbError, ServerHealthMetrics};
 use cottondata_grid::{CellValue, ColumnMeta, ColumnarPage};
 use rusqlite::{Connection, Statement};
@@ -41,7 +42,11 @@ pub(crate) fn describe_columns(statement: &Statement<'_>) -> Vec<ColumnMeta> {
 }
 
 pub(crate) fn read_page(mut statement: Statement<'_>, sql: &str, max_rows: u32, must_drain: bool) -> Result<ColumnarPage, DbError> {
-    let row_cap = max_rows.max(1) as usize;
+    let row_cap = if max_rows == UNLIMITED_ROWS {
+        usize::MAX
+    } else {
+        max_rows.max(1) as usize
+    };
     let columns = describe_columns(&statement);
     let column_count = columns.len();
     let mut page = ColumnarPage::new(columns, sql.to_string());

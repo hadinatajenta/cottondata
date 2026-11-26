@@ -5,6 +5,7 @@ use std::fmt;
 pub const SERVER_SLOT_CAPACITY: usize = 64;
 pub const DEFAULT_MAX_SERVERS: usize = 10;
 pub const MAX_SOCKETS_PER_SERVER: usize = 2;
+pub const MAX_ENVIRONMENT_LABEL_CHARS: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ServerSlotId(u8);
@@ -169,6 +170,10 @@ pub struct ServerProfile {
     #[serde(default)]
     pub environment: EnvironmentTag,
     #[serde(default)]
+    pub environment_label: Option<String>,
+    #[serde(default)]
+    pub environment_color: Option<[u8; 3]>,
+    #[serde(default)]
     pub read_only: bool,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
@@ -180,8 +185,11 @@ pub struct ServerProfile {
     pub show_system_schemas: bool,
 }
 
+pub const DEFAULT_PAGE_SIZE: u32 = 100;
+pub const UNLIMITED_ROWS: u32 = u32::MAX;
+
 fn default_page_size() -> u32 {
-    500
+    DEFAULT_PAGE_SIZE
 }
 
 fn default_connect_timeout() -> u16 {
@@ -213,12 +221,37 @@ impl ServerProfile {
             ca_cert_path: None,
             ssh: SshTunnelConfig::default_enabled(),
             environment: EnvironmentTag::Local,
+            environment_label: None,
+            environment_color: None,
             read_only: false,
             page_size: default_page_size(),
             connect_timeout_secs: default_connect_timeout(),
             idle_disconnect_mins: default_idle_disconnect_mins(),
             show_system_schemas: false,
         }
+    }
+
+    pub fn env_display_label(&self) -> &str {
+        self.environment_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.environment.label())
+    }
+
+    pub fn env_display_rgb(&self) -> [u8; 3] {
+        self.environment_color.unwrap_or_else(|| self.environment.rgb())
+    }
+
+    pub fn is_production(&self) -> bool {
+        matches!(self.environment, EnvironmentTag::Production)
+    }
+
+    pub fn has_custom_environment(&self) -> bool {
+        self.environment_label
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || self.environment_color.is_some()
     }
 
     pub fn initial_schema(&self) -> Option<String> {
@@ -275,6 +308,13 @@ impl ServerProfile {
         }
         if self.page_size == 0 || self.page_size > 10_000 {
             return Err(RegistryError::InvalidProfile("Page size must be between 1 and 10,000".into()));
+        }
+        if let Some(label) = &self.environment_label {
+            if label.trim().chars().count() > MAX_ENVIRONMENT_LABEL_CHARS {
+                return Err(RegistryError::InvalidProfile(format!(
+                    "Environment label must be at most {MAX_ENVIRONMENT_LABEL_CHARS} characters"
+                )));
+            }
         }
         Ok(())
     }
@@ -366,6 +406,7 @@ impl std::error::Error for RegistryError {}
 #[derive(Debug, Clone)]
 pub struct ServerRegistry {
     slots: [Option<ServerSlot>; SERVER_SLOT_CAPACITY],
+    order: Vec<ServerSlotId>,
     max_servers: usize,
 }
 
@@ -373,6 +414,7 @@ impl Default for ServerRegistry {
     fn default() -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
+            order: Vec::new(),
             max_servers: DEFAULT_MAX_SERVERS,
         }
     }
@@ -435,6 +477,7 @@ impl ServerRegistry {
             status: ConnectionStatus::Disconnected,
             runtime: None,
         });
+        self.order.push(slot_id);
         Ok(slot_id)
     }
 
@@ -457,9 +500,11 @@ impl ServerRegistry {
     }
 
     pub fn remove(&mut self, slot_id: ServerSlotId) -> Result<ServerSlot, RegistryError> {
-        self.slots[slot_id.index()]
+        let removed = self.slots[slot_id.index()]
             .take()
-            .ok_or(RegistryError::SlotEmpty(slot_id))
+            .ok_or(RegistryError::SlotEmpty(slot_id))?;
+        self.order.retain(|&id| id != slot_id);
+        Ok(removed)
     }
 
     pub fn get(&self, slot_id: ServerSlotId) -> Option<&ServerSlot> {
@@ -471,7 +516,53 @@ impl ServerRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ServerSlot> {
-        self.slots.iter().flatten()
+        self.order
+            .iter()
+            .filter_map(|id| self.slots[id.index()].as_ref())
+    }
+
+    pub fn reorder(&mut self, slot_id: ServerSlotId, target_index: usize) -> bool {
+        let Some(current_index) = self.order.iter().position(|&id| id == slot_id) else {
+            return false;
+        };
+        let clamped = target_index.min(self.order.len().saturating_sub(1));
+        if current_index == clamped {
+            return false;
+        }
+        let id = self.order.remove(current_index);
+        self.order.insert(clamped, id);
+        true
+    }
+
+    pub fn move_by(&mut self, slot_id: ServerSlotId, delta: isize) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let Some(current_index) = self.order.iter().position(|&id| id == slot_id) else {
+            return false;
+        };
+        let max_idx = self.order.len().saturating_sub(1);
+        let target = if delta < 0 {
+            current_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            current_index.saturating_add(delta as usize).min(max_idx)
+        };
+        self.reorder(slot_id, target)
+    }
+
+    pub fn slot_at_position(&self, display_index: usize) -> Option<ServerSlotId> {
+        self.order.get(display_index).copied()
+    }
+
+    pub fn display_number_of(&self, slot_id: ServerSlotId) -> Option<usize> {
+        self.order
+            .iter()
+            .position(|&id| id == slot_id)
+            .map(|pos| pos + 1)
+    }
+
+    pub fn order(&self) -> &[ServerSlotId] {
+        &self.order
     }
 
     pub fn profiles(&self) -> Vec<ServerProfile> {
@@ -610,5 +701,104 @@ mod tests {
         assert!(!old.supports_explain_analyze());
         assert!(!old.supports_functional_indexes());
         assert!(old.supports_generated_columns());
+    }
+
+    #[test]
+    fn reorder_and_move_by_preserve_slot_ids_and_display_order() {
+        let mut reg = ServerRegistry::new();
+        let s0 = reg.add(ServerProfile::new_local("Alpha", "127.0.0.1", 3306, "root")).unwrap();
+        let s1 = reg.add(ServerProfile::new_local("Beta", "127.0.0.1", 3307, "root")).unwrap();
+        let s2 = reg.add(ServerProfile::new_local("Gamma", "127.0.0.1", 3308, "root")).unwrap();
+        let s3 = reg.add(ServerProfile::new_local("Delta", "127.0.0.1", 3309, "root")).unwrap();
+
+        assert_eq!(reg.order(), &[s0, s1, s2, s3]);
+        assert_eq!(reg.slot_at_position(0), Some(s0));
+        assert_eq!(reg.slot_at_position(3), Some(s3));
+        assert_eq!(reg.slot_at_position(4), None);
+        assert_eq!(reg.display_number_of(s2), Some(3));
+
+        assert!(reg.reorder(s0, 2));
+        assert_eq!(reg.order(), &[s1, s2, s0, s3]);
+        let names: Vec<String> = reg.profiles().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["Beta", "Gamma", "Alpha", "Delta"]);
+        assert_eq!(reg.get(s0).unwrap().profile.name, "Alpha");
+        assert_eq!(reg.get(s0).unwrap().slot_id, s0);
+        assert_eq!(reg.display_number_of(s0), Some(3));
+
+        assert!(reg.reorder(s3, 0));
+        assert_eq!(reg.order(), &[s3, s1, s2, s0]);
+        assert!(!reg.reorder(s3, 0));
+        assert!(reg.reorder(s3, 99));
+        assert_eq!(reg.order(), &[s1, s2, s0, s3]);
+
+        assert!(!reg.move_by(s1, -1));
+        assert!(!reg.move_by(s3, 1));
+        assert!(!reg.move_by(s2, 0));
+        assert!(reg.move_by(s0, -1));
+        assert_eq!(reg.order(), &[s1, s0, s2, s3]);
+        assert!(reg.move_by(s0, 10));
+        assert_eq!(reg.order(), &[s1, s2, s3, s0]);
+        assert!(reg.move_by(s0, isize::MIN));
+        assert_eq!(reg.order(), &[s0, s1, s2, s3]);
+
+        let removed = reg.remove(s2).unwrap();
+        assert_eq!(removed.profile.name, "Gamma");
+        assert_eq!(reg.order(), &[s0, s1, s3]);
+        assert_eq!(reg.display_number_of(s2), None);
+        assert_eq!(reg.display_number_of(s3), Some(3));
+        assert!(!reg.reorder(s2, 0));
+        assert!(!reg.move_by(s2, 1));
+
+        let reused = reg.add(ServerProfile::new_local("Epsilon", "127.0.0.1", 3310, "root")).unwrap();
+        assert_eq!(reused, s2);
+        assert_eq!(reg.order(), &[s0, s1, s3, s2]);
+        assert_eq!(reg.display_number_of(reused), Some(4));
+
+        let roundtripped = ServerRegistry::from_profiles(reg.profiles(), 10).unwrap();
+        let roundtripped_names: Vec<String> = roundtripped.profiles().into_iter().map(|p| p.name).collect();
+        assert_eq!(roundtripped_names, vec!["Alpha", "Beta", "Delta", "Epsilon"]);
+    }
+
+    #[test]
+    fn custom_environment_helpers_validation_and_serde_roundtrip() {
+        let mut legacy = ServerProfile::new_local("Legacy", "10.0.0.1", 3306, "app");
+        legacy.environment = EnvironmentTag::Production;
+        let mut json_val = serde_json::to_value(&legacy).unwrap();
+        json_val.as_object_mut().unwrap().remove("environment_label");
+        json_val.as_object_mut().unwrap().remove("environment_color");
+        let parsed: ServerProfile = serde_json::from_value(json_val).unwrap();
+        assert_eq!(parsed.environment_label, None);
+        assert_eq!(parsed.environment_color, None);
+        assert_eq!(parsed.env_display_label(), "PROD");
+        assert_eq!(parsed.env_display_rgb(), EnvironmentTag::Production.rgb());
+        assert!(parsed.is_production());
+        assert!(!parsed.has_custom_environment());
+
+        let mut custom = ServerProfile::new_local("Analytics", "10.0.0.2", 5432, "pg");
+        custom.environment = EnvironmentTag::Staging;
+        custom.environment_label = Some("   ".into());
+        assert_eq!(custom.validate(), Ok(()));
+        assert_eq!(custom.env_display_label(), "STAGING");
+        assert!(!custom.has_custom_environment());
+        assert!(!custom.is_production());
+
+        custom.environment_label = Some("  EU-West QA  ".into());
+        custom.environment_color = Some([140, 90, 250]);
+        assert_eq!(custom.validate(), Ok(()));
+        assert_eq!(custom.env_display_label(), "EU-West QA");
+        assert_eq!(custom.env_display_rgb(), [140, 90, 250]);
+        assert!(custom.has_custom_environment());
+
+        let raw = serde_json::to_string(&custom).unwrap();
+        let restored: ServerProfile = serde_json::from_str(&raw).unwrap();
+        assert_eq!(restored, custom);
+
+        custom.environment_label = Some("é".repeat(MAX_ENVIRONMENT_LABEL_CHARS));
+        assert_eq!(custom.validate(), Ok(()));
+
+        custom.environment_label = Some("é".repeat(MAX_ENVIRONMENT_LABEL_CHARS + 1));
+        let err = custom.validate().unwrap_err();
+        assert!(matches!(err, RegistryError::InvalidProfile(_)));
+        assert!(err.to_string().contains("24"));
     }
 }
