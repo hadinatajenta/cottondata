@@ -264,7 +264,10 @@ pub fn split_statements(input: &str) -> Vec<SqlStatement<'_>> {
         if !in_single && !in_double && !in_backtick && !in_line_comment && !in_block_comment && at_line_start {
             let line_end = input[i..].find('\n').map(|o| i + o).unwrap_or(len);
             let trimmed = input[i..line_end].trim();
-            if trimmed.len() > 10 && trimmed[..9].eq_ignore_ascii_case("DELIMITER") && trimmed.as_bytes()[9].is_ascii_whitespace() {
+            let has_delimiter_keyword = trimmed
+                .get(..9)
+                .is_some_and(|keyword| keyword.eq_ignore_ascii_case("DELIMITER"));
+            if has_delimiter_keyword && trimmed.len() > 10 && trimmed.as_bytes()[9].is_ascii_whitespace() {
                 let new_delim = trimmed[9..].trim();
                 if !new_delim.is_empty() {
                     let prefix = input[stmt_start..i].trim();
@@ -389,7 +392,7 @@ pub fn split_statements(input: &str) -> Vec<SqlStatement<'_>> {
             continue;
         }
 
-        if input[i..].starts_with(&delimiter) {
+        if bytes[i..].starts_with(delimiter.as_bytes()) {
             let segment = input[stmt_start..i].trim();
             if !segment.is_empty() {
                 statements.push(SqlStatement { sql: segment, start: stmt_start, end: i });
@@ -433,6 +436,16 @@ pub fn statement_at_offset(input: &str, byte_offset: usize) -> Option<SqlStateme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_statements_without_panicking_on_multibyte_characters_near_line_start() {
+        let script = "SELECT 1;\n-- catatan: café ✓ selesai\nSELECT 'ééééé' AS label;\n日本語日本語日本語";
+        let statements = split_statements(script);
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0].sql, "SELECT 1");
+        assert_eq!(statements[1].sql, "-- catatan: café ✓ selesai\nSELECT 'ééééé' AS label");
+        assert_eq!(statements[2].sql, "日本語日本語日本語");
+    }
 
     #[test]
     fn splits_delimiter_procedures_and_semicolons() {
