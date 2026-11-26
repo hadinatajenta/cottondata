@@ -1,13 +1,16 @@
+use super::completion_popup::{
+    collect_visible_completions, consume_completion_keys, render_completion_popup, typed_word, CompletionKeyAction,
+};
 use super::{insert_completion, CottonDataApp};
 use crate::theme::{highlight_mysql_editor_with_matches, Palette};
 use crate::ui_kit::{
-    banner, caption, ghost_button, icon, icon_button, icon_text, inset_frame, primary_button, secondary_button,
+    banner, caption, ghost_button, icon, icon_button, inset_frame, primary_button, secondary_button,
     styled_text_input, tinted_ghost_button, toolbar_divider,
 };
 use crate::worker::SlotCmd;
 use cottondata_sql::{
     analyze_statement, duplicate_lines, find_matches, format_mysql, move_lines_down, move_lines_up,
-    replace_all_matches, replace_match, statement_at_offset, toggle_line_comment, CompletionProvider, EditResult,
+    replace_all_matches, replace_match, statement_at_offset, toggle_line_comment, EditResult,
     SearchOptions, WriteClass,
 };
 use eframe::egui::{self, text::CCursor, text::CCursorRange, text::LayoutJob, FontFamily, FontId, RichText, Stroke, TextFormat};
@@ -41,7 +44,7 @@ impl CottonDataApp {
         let mut open_find_bar = false;
         let mut save_snippet = false;
 
-        let (is_running, safety_warning, current_sql, cursor_byte, has_selection, slot_for_tab) = {
+        let (is_running, safety_warning, has_selection, slot_for_tab) = {
             let tab = &self.tabs[self.active_tab_idx];
             let stmt = statement_at_offset(&tab.sql, tab.cursor_byte)
                 .map(|s| s.sql)
@@ -54,8 +57,6 @@ impl CottonDataApp {
                 } else {
                     None
                 },
-                tab.sql.clone(),
-                tab.cursor_byte,
                 tab.selection_byte_range.is_some(),
                 tab.slot.or(self.active_slot),
             )
@@ -185,6 +186,52 @@ impl CottonDataApp {
             }
         }
 
+        let hints = slot_for_tab
+            .and_then(|s| {
+                let active_db = self
+                    .registry
+                    .get(s)
+                    .and_then(|sl| sl.runtime.as_ref())
+                    .and_then(|r| r.current_schema.as_deref());
+                self.catalogs[s.index()]
+                    .as_ref()
+                    .map(|cat| cat.completion_hints(active_db))
+            })
+            .unwrap_or_default();
+
+        let is_completion_allowed = is_editor_focused && !self.is_any_modal_open();
+        let (completion_items, completion_prefix) = {
+            let tab = &mut self.tabs[self.active_tab_idx];
+            let cursor = tab.cursor_byte.min(tab.sql.len());
+            tab.completion_popup.sync_anchor(cursor, tab.sql.len());
+            if !is_completion_allowed {
+                tab.completion_popup.is_active = false;
+            } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space)) {
+                tab.completion_popup.is_active = true;
+            }
+            if tab.completion_popup.is_active && tab.selection_byte_range.is_none() {
+                let items = collect_visible_completions(&tab.sql, cursor, &hints);
+                let prefix = if items.is_empty() {
+                    String::new()
+                } else {
+                    typed_word(&tab.sql, cursor).to_string()
+                };
+                (items, prefix)
+            } else {
+                (Vec::new(), String::new())
+            }
+        };
+        let mut accepted_completion = None;
+        {
+            let popup_state = &mut self.tabs[self.active_tab_idx].completion_popup;
+            match consume_completion_keys(ui, popup_state, completion_items.len()) {
+                Some(CompletionKeyAction::Accept(idx)) => accepted_completion = Some(idx),
+                Some(CompletionKeyAction::Dismiss) => popup_state.is_active = false,
+                None => {}
+            }
+        }
+        let mut caret_screen_rect = None;
+
         let (search_matches, active_match_idx) = {
             let tab = &self.tabs[self.active_tab_idx];
             if tab.find_replace.open && !tab.find_replace.query.is_empty() {
@@ -275,11 +322,18 @@ impl CottonDataApp {
                             .show(ui);
                         if out.response.changed() {
                             sql_edited = true;
+                            tab.completion_popup.is_active = true;
+                            ui.ctx().request_repaint();
                         }
                         if out.response.lost_focus() {
                             editor_lost_focus = true;
                         }
                         if let Some(range) = out.cursor_range {
+                            let caret_rect = out
+                                .galley
+                                .pos_from_cursor(&range.primary)
+                                .translate(out.galley_pos.to_vec2());
+                            caret_screen_rect = ui.clip_rect().intersects(caret_rect).then_some(caret_rect);
                             let primary_idx = range.primary.ccursor.index;
                             let secondary_idx = range.secondary.ccursor.index;
                             tab.cursor_byte = char_index_to_byte(&tab.sql, primary_idx);
@@ -295,31 +349,29 @@ impl CottonDataApp {
                 });
         });
 
-        let hints = slot_for_tab
-            .and_then(|s| {
-                let active_db = self
-                    .registry
-                    .get(s)
-                    .and_then(|sl| sl.runtime.as_ref())
-                    .and_then(|r| r.current_schema.as_deref());
-                self.catalogs[s.index()]
-                    .as_ref()
-                    .map(|cat| cat.completion_hints(active_db))
-            })
-            .unwrap_or_default();
-
-        let suggestions = CompletionProvider::suggest(&current_sql, cursor_byte, &hints, 6);
-        if !suggestions.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(icon_text(icon::SPARKLE, p.accent, "Suggestions", p.text_muted, 11.5));
-                for item in &suggestions {
-                    if ui.small_button(format!("{} ({})", item.label, item.detail)).clicked() {
-                        let tab = &mut self.tabs[self.active_tab_idx];
-                        insert_completion(&mut tab.sql, tab.cursor_byte, &item.label);
-                        sql_edited = true;
-                    }
-                }
-            });
+        if let Some(caret_rect) = caret_screen_rect.filter(|_| !completion_items.is_empty()) {
+            let clicked_idx = render_completion_popup(
+                ui.ctx(),
+                p,
+                editor_id.with("completion_popup"),
+                caret_rect,
+                &completion_prefix,
+                &completion_items,
+                &mut self.tabs[self.active_tab_idx].completion_popup,
+            );
+            if clicked_idx.is_some() {
+                accepted_completion = clicked_idx;
+                ui.memory_mut(|m| m.request_focus(editor_id));
+            }
+        }
+        if let Some(chosen) = accepted_completion.and_then(|idx| completion_items.get(idx)) {
+            let tab = &mut self.tabs[self.active_tab_idx];
+            let new_cursor = insert_completion(&mut tab.sql, tab.cursor_byte, &chosen.label);
+            tab.cursor_byte = new_cursor;
+            tab.selection_byte_range = None;
+            tab.pending_cursor_range = Some((new_cursor, new_cursor));
+            tab.completion_popup.is_active = false;
+            sql_edited = true;
         }
 
         if toggle_expand_editor {

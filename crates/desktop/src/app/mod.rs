@@ -1,4 +1,5 @@
 mod activity;
+mod completion_popup;
 mod data_grid;
 mod er_diagram;
 mod events;
@@ -600,14 +601,11 @@ pub(super) fn truncate_display(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) fn insert_completion(sql: &mut String, cursor_byte: usize, completion: &str) {
+pub(super) fn insert_completion(sql: &mut String, cursor_byte: usize, completion: &str) -> usize {
     let clamped = cursor_byte.min(sql.len());
-    let before = &sql[..clamped];
-    let replace_start = before
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '`')))
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+    let replace_start = completion_popup::word_prefix_start(&sql[..clamped]);
     sql.replace_range(replace_start..clamped, completion);
+    replace_start + completion.len()
 }
 
 #[cfg(test)]

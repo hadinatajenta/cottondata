@@ -1,3 +1,4 @@
+use super::completion_popup::CompletionPopupState;
 use super::row_selection::RowSelection;
 use cottondata_core::{ServerSlotId, SqlDialect};
 use cottondata_grid::{CellValue, ColumnarPage, PageFilterSort, SortDirection, StagedMutator};
@@ -94,6 +95,7 @@ pub(super) struct QueryTab {
     pub(super) is_loading_full_cell: bool,
     pub(super) show_sql_editor: bool,
     pub(super) find_replace: FindReplaceState,
+    pub(super) completion_popup: CompletionPopupState,
     pub(super) pending_cursor_range: Option<(usize, usize)>,
 }
 
@@ -133,6 +135,7 @@ impl QueryTab {
             is_loading_full_cell: false,
             show_sql_editor: true,
             find_replace: FindReplaceState::default(),
+            completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
         }
     }
@@ -181,6 +184,7 @@ impl QueryTab {
             is_loading_full_cell: false,
             show_sql_editor: false,
             find_replace: FindReplaceState::default(),
+            completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
         }
     }
@@ -239,6 +243,7 @@ impl QueryTab {
             is_loading_full_cell: false,
             show_sql_editor: state.show_sql_editor.unwrap_or_else(|| state.bound_table.is_none()),
             find_replace: FindReplaceState::default(),
+            completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
         }
     }
