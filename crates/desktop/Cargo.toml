@@ -1,0 +1,30 @@
+[package]
+name = "cottondata-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "CottonData"
+path = "src/main.rs"
+
+[dependencies]
+cottondata-core.workspace = true
+cottondata-grid.workspace = true
+cottondata-introspect.workspace = true
+cottondata-mysql.workspace = true
+cottondata-sql.workspace = true
+cottondata-storage.workspace = true
+eframe.workspace = true
+mimalloc.workspace = true
+rfd.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "=0.15.3", default-features = false, features = ["common-controls-v6"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "=0.15.3", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "=0.1.22"

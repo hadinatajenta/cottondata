@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/mysql",
+    "crates/introspect",
+    "crates/sql",
+    "crates/grid",
+    "crates/storage",
+    "crates/cli",
+    "crates/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Hadinata <hadinata.jenta@sharingvision.co.id>"]
+repository = "https://github.com/hadinatajenta/cottondata"
+
+[workspace.dependencies]
+cottondata-core = { path = "crates/core" }
+cottondata-mysql = { path = "crates/mysql" }
+cottondata-introspect = { path = "crates/introspect" }
+cottondata-sql = { path = "crates/sql" }
+cottondata-grid = { path = "crates/grid" }
+cottondata-storage = { path = "crates/storage" }
+
+eframe = { version = "=0.31.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+rfd = { version = "=0.15.3", default-features = false }
+mysql = { version = "26.0.1", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+mimalloc = "0.1.48"
+lasso = "0.7.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

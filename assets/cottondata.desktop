@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CottonData
+GenericName=MySQL Database Client
+Comment=Featherweight native Rust MySQL client for up to 10 servers
+Exec=CottonData %U
+Icon=cottondata
+Terminal=false
+Categories=Development;Database;
+Keywords=mysql;sql;database;client;query;
+StartupWMClass=CottonData

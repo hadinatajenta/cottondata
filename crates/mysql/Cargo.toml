@@ -1,0 +1,14 @@
+[package]
+name = "cottondata-mysql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cottondata-core.workspace = true
+cottondata-grid.workspace = true
+cottondata-sql.workspace = true
+mysql.workspace = true
+serde.workspace = true
+serde_json.workspace = true
