@@ -5,15 +5,19 @@ use std::io::{self, Write};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
+    Tsv,
     JsonLines,
     JsonArray,
     SqlInserts,
 }
 
 impl ExportFormat {
+    pub const ALL: [ExportFormat; 5] = [Self::Csv, Self::Tsv, Self::JsonLines, Self::JsonArray, Self::SqlInserts];
+
     pub fn extension(self) -> &'static str {
         match self {
             Self::Csv => "csv",
+            Self::Tsv => "tsv",
             Self::JsonLines => "jsonl",
             Self::JsonArray => "json",
             Self::SqlInserts => "sql",
@@ -23,29 +27,77 @@ impl ExportFormat {
     pub fn label(self) -> &'static str {
         match self {
             Self::Csv => "CSV (.csv)",
+            Self::Tsv => "TSV (.tsv)",
             Self::JsonLines => "JSON Lines (.jsonl)",
             Self::JsonArray => "JSON Array (.json)",
             Self::SqlInserts => "SQL INSERT (.sql)",
         }
     }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::Tsv => "TSV",
+            Self::JsonLines => "JSON Lines",
+            Self::JsonArray => "JSON",
+            Self::SqlInserts => "SQL INSERT",
+        }
+    }
+}
+
+pub fn export_rows<W: Write>(
+    page: &ColumnarPage,
+    rows: &[usize],
+    format: ExportFormat,
+    table_name: &str,
+    writer: &mut W,
+) -> io::Result<()> {
+    let rows: Vec<usize> = rows.iter().copied().filter(|&row| row < page.row_count).collect();
+    match format {
+        ExportFormat::Csv => write_delimited(page, &rows, b',', writer),
+        ExportFormat::Tsv => write_delimited(page, &rows, b'\t', writer),
+        ExportFormat::JsonLines => write_json_lines(page, &rows, writer),
+        ExportFormat::JsonArray => write_json_array(page, &rows, writer),
+        ExportFormat::SqlInserts => write_sql_inserts(page, &rows, table_name, writer),
+    }
 }
 
 pub fn export_csv<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
-    for (i, col) in page.columns.iter().enumerate() {
-        if i > 0 {
-            writer.write_all(b",")?;
+    export_rows(page, &all_rows(page), ExportFormat::Csv, "", writer)
+}
+
+pub fn export_json_lines<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
+    export_rows(page, &all_rows(page), ExportFormat::JsonLines, "", writer)
+}
+
+pub fn export_json_array<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
+    export_rows(page, &all_rows(page), ExportFormat::JsonArray, "", writer)
+}
+
+pub fn export_sql_inserts<W: Write>(page: &ColumnarPage, table_name: &str, writer: &mut W) -> io::Result<()> {
+    export_rows(page, &all_rows(page), ExportFormat::SqlInserts, table_name, writer)
+}
+
+fn all_rows(page: &ColumnarPage) -> Vec<usize> {
+    (0..page.row_count).collect()
+}
+
+fn write_delimited<W: Write>(page: &ColumnarPage, rows: &[usize], delimiter: u8, writer: &mut W) -> io::Result<()> {
+    for (column_index, column) in page.columns.iter().enumerate() {
+        if column_index > 0 {
+            writer.write_all(&[delimiter])?;
         }
-        write_csv_field(writer, &col.name)?;
+        write_delimited_field(writer, &column.name, delimiter)?;
     }
     writer.write_all(b"\n")?;
 
-    for row in 0..page.row_count {
-        for col in 0..page.columns.len() {
-            if col > 0 {
-                writer.write_all(b",")?;
+    for &row in rows {
+        for column_index in 0..page.columns.len() {
+            if column_index > 0 {
+                writer.write_all(&[delimiter])?;
             }
-            if let Some(s) = page.cell_str(row, col) {
-                write_csv_field(writer, s)?;
+            if let Some(value) = page.cell_str(row, column_index) {
+                write_delimited_field(writer, value, delimiter)?;
             }
         }
         writer.write_all(b"\n")?;
@@ -53,37 +105,30 @@ pub fn export_csv<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<(
     Ok(())
 }
 
-fn write_csv_field<W: Write>(writer: &mut W, value: &str) -> io::Result<()> {
-    let needs_quotes = value.contains([',', '"', '\n', '\r']);
+fn write_delimited_field<W: Write>(writer: &mut W, value: &str, delimiter: u8) -> io::Result<()> {
+    let needs_quotes = value.contains(['"', '\n', '\r']) || value.as_bytes().contains(&delimiter);
     if !needs_quotes {
         return writer.write_all(value.as_bytes());
     }
     writer.write_all(b"\"")?;
-    for ch in value.chars() {
-        if ch == '"' {
-            writer.write_all(b"\"\"")?;
-        } else {
-            let mut buf = [0u8; 4];
-            writer.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
-        }
-    }
+    writer.write_all(value.replace('"', "\"\"").as_bytes())?;
     writer.write_all(b"\"")
 }
 
-pub fn export_json_lines<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
-    for row in 0..page.row_count {
+fn write_json_lines<W: Write>(page: &ColumnarPage, rows: &[usize], writer: &mut W) -> io::Result<()> {
+    for &row in rows {
         write_json_row(page, row, writer)?;
         writer.write_all(b"\n")?;
     }
     Ok(())
 }
 
-pub fn export_json_array<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::Result<()> {
+fn write_json_array<W: Write>(page: &ColumnarPage, rows: &[usize], writer: &mut W) -> io::Result<()> {
     writer.write_all(b"[\n")?;
-    for row in 0..page.row_count {
+    for (position, &row) in rows.iter().enumerate() {
         writer.write_all(b"  ")?;
         write_json_row(page, row, writer)?;
-        if row + 1 < page.row_count {
+        if position + 1 < rows.len() {
             writer.write_all(b",")?;
         }
         writer.write_all(b"\n")?;
@@ -92,43 +137,157 @@ pub fn export_json_array<W: Write>(page: &ColumnarPage, writer: &mut W) -> io::R
 }
 
 fn write_json_row<W: Write>(page: &ColumnarPage, row: usize, writer: &mut W) -> io::Result<()> {
-    let mut map = serde_json::Map::with_capacity(page.columns.len());
-    for (col_idx, col) in page.columns.iter().enumerate() {
-        let json_val = match page.cell_str(row, col_idx) {
-            None => serde_json::Value::Null,
-            Some(s) => serde_json::Value::String(s.to_string()),
-        };
-        map.insert(col.name.clone(), json_val);
+    writer.write_all(b"{")?;
+    for (column_index, column) in page.columns.iter().enumerate() {
+        if column_index > 0 {
+            writer.write_all(b",")?;
+        }
+        serde_json::to_writer(&mut *writer, &column.name).map_err(io::Error::other)?;
+        writer.write_all(b":")?;
+        let json_value = to_json_value(page.cell_str(row, column_index), column.is_numeric);
+        serde_json::to_writer(&mut *writer, &json_value).map_err(io::Error::other)?;
     }
-    serde_json::to_writer(writer, &serde_json::Value::Object(map))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    writer.write_all(b"}")
 }
 
-pub fn export_sql_inserts<W: Write>(
+fn to_json_value(cell: Option<&str>, is_numeric: bool) -> serde_json::Value {
+    let Some(text) = cell else {
+        return serde_json::Value::Null;
+    };
+    if is_numeric {
+        if let Ok(integer) = text.parse::<i64>() {
+            return serde_json::Value::from(integer);
+        }
+        if let Ok(unsigned) = text.parse::<u64>() {
+            return serde_json::Value::from(unsigned);
+        }
+    }
+    serde_json::Value::String(text.to_string())
+}
+
+fn write_sql_inserts<W: Write>(
     page: &ColumnarPage,
+    rows: &[usize],
     table_name: &str,
     writer: &mut W,
 ) -> io::Result<()> {
-    if page.row_count == 0 || page.columns.is_empty() {
+    if rows.is_empty() || page.columns.is_empty() {
         return Ok(());
     }
-    let col_list = page
+    let column_list = page
         .columns
         .iter()
-        .map(|c| format!("`{}`", escape_ident(&c.name)))
+        .map(|column| format!("`{}`", escape_ident(&column.name)))
         .collect::<Vec<_>>()
         .join(", ");
     let escaped_table = escape_ident(table_name);
 
-    for row in 0..page.row_count {
-        let vals = page
+    for &row in rows {
+        let values = page
             .columns
             .iter()
             .enumerate()
-            .map(|(c, meta)| format_sql_literal(&page.cell_value(row, c), meta.is_numeric))
+            .map(|(column_index, meta)| format_sql_literal(&page.cell_value(row, column_index), meta.is_numeric))
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(writer, "INSERT INTO `{escaped_table}` ({col_list}) VALUES ({vals});")?;
+        writeln!(
+            writer,
+            "INSERT INTO `{escaped_table}` ({column_list}) VALUES ({values});"
+        )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page::{CellValue, ColumnMeta};
+
+    fn column(name: &str, is_numeric: bool) -> ColumnMeta {
+        ColumnMeta {
+            name: name.into(),
+            table: Some("users".into()),
+            schema: Some("app".into()),
+            type_name: if is_numeric { "int".into() } else { "varchar(64)".into() },
+            is_primary_key: false,
+            is_nullable: true,
+            is_auto_increment: false,
+            is_numeric,
+        }
+    }
+
+    fn sample_page() -> ColumnarPage {
+        let mut page = ColumnarPage::new(vec![column("id", true), column("note", false)], "SELECT 1".into());
+        page.push_row(&[CellValue::Text("1".into()), CellValue::Text("plain".into())]);
+        page.push_row(&[
+            CellValue::Text("2".into()),
+            CellValue::Text("tab\there, \"quoted\"".into()),
+        ]);
+        page.push_row(&[CellValue::Text("3".into()), CellValue::Null]);
+        page
+    }
+
+    fn render(rows: &[usize], format: ExportFormat) -> String {
+        let mut buffer = Vec::new();
+        export_rows(&sample_page(), rows, format, "users", &mut buffer).expect("export succeeds");
+        String::from_utf8(buffer).expect("utf8 output")
+    }
+
+    #[test]
+    fn tsv_exports_only_selected_rows_in_given_order_and_quotes_tabs() {
+        let output = render(&[2, 1], ExportFormat::Tsv);
+        assert_eq!(output, "id\tnote\n3\t\n2\t\"tab\there, \"\"quoted\"\"\"\n");
+    }
+
+    #[test]
+    fn csv_quotes_only_fields_containing_delimiter_quotes_or_newlines() {
+        assert_eq!(render(&[0], ExportFormat::Csv), "id,note\n1,plain\n");
+        assert!(render(&[1], ExportFormat::Csv).contains("\"tab\there, \"\"quoted\"\"\""));
+    }
+
+    #[test]
+    fn json_array_maps_null_cells_to_json_null() {
+        let output = render(&[0, 2], ExportFormat::JsonArray);
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(parsed[0]["note"], "plain");
+        assert!(parsed[1]["note"].is_null());
+        assert_eq!(parsed.as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn json_keeps_column_order_and_emits_numeric_columns_as_numbers() {
+        let output = render(&[0], ExportFormat::JsonLines);
+        assert_eq!(output, "{\"id\":1,\"note\":\"plain\"}\n");
+    }
+
+    #[test]
+    fn json_emits_only_exact_integers_as_numbers_and_keeps_decimals_as_strings() {
+        assert_eq!(
+            to_json_value(Some("18446744073709551615"), true).to_string(),
+            "18446744073709551615"
+        );
+        assert_eq!(to_json_value(Some("-42"), true).to_string(), "-42");
+        assert_eq!(
+            to_json_value(Some("12.50"), true),
+            serde_json::Value::String("12.50".into())
+        );
+        assert_eq!(to_json_value(Some("42"), false), serde_json::Value::String("42".into()));
+        assert_eq!(to_json_value(None, true), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn sql_inserts_emit_one_statement_per_selected_row_with_null_literal() {
+        let output = render(&[2], ExportFormat::SqlInserts);
+        assert_eq!(output.lines().count(), 1);
+        assert!(
+            output.starts_with("INSERT INTO `users` (`id`, `note`) VALUES (3, NULL);"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_rows_are_ignored_and_empty_selection_writes_nothing_for_sql() {
+        assert_eq!(render(&[99], ExportFormat::Tsv), "id\tnote\n");
+        assert_eq!(render(&[], ExportFormat::SqlInserts), "");
+    }
 }
