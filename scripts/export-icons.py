@@ -19,9 +19,6 @@ def main() -> None:
         resized = img.resize((sz, sz), Image.Resampling.LANCZOS)
         resized.save(assets / f"AppIcon-{sz}.png", "PNG", optimize=True)
 
-    icon_64 = img.resize((64, 64), Image.Resampling.LANCZOS)
-    (assets / "AppIcon-64.rgba").write_bytes(icon_64.tobytes("raw", "RGBA"))
-
     ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     img.save(assets / "AppIcon.ico", format="ICO", sizes=ico_sizes)
 
@@ -37,7 +34,7 @@ def main() -> None:
                 check=True,
             )
 
-    for name in ("AppIcon-1024.png", "AppIcon-512.png", "AppIcon-256.png", "AppIcon-128.png", "AppIcon-64.rgba", "AppIcon.ico", "AppIcon.icns"):
+    for name in ("AppIcon-1024.png", "AppIcon-512.png", "AppIcon-256.png", "AppIcon-128.png", "AppIcon.ico", "AppIcon.icns"):
         p = assets / name
         if p.exists():
             print(f"OK: {p} ({p.stat().st_size:,} bytes)")
