@@ -176,43 +176,47 @@ fn render_schema_node(
         } else {
             palette.text_primary
         };
-        let label = egui::Label::new(icon_text(
-            icon::STACK,
-            if is_active_schema {
-                palette.accent
-            } else {
-                palette.icon_schema
-            },
-            schema_name,
-            name_color,
-            13.0,
-        ))
-        .truncate()
-        .sense(Sense::click());
-        let resp = ui.add(label).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if resp.clicked() {
-            state.toggle(ui);
-        }
-        resp.context_menu(|ui| {
-            ui.set_min_width(180.0);
-            if ui.button(format!("{}  Set as active schema", icon::CHECK_CIRCLE)).clicked() {
-                requests.set_active_schema = Some(schema_name.to_string());
-                ui.close_menu();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if view.activity.loading_schemas.contains(schema_name) {
+                busy_indicator(ui, palette, "");
+            } else if schema.l1_loaded {
+                caption(ui, palette, schema.tables.len().to_string());
             }
-            if ui.button(format!("{}  Refresh tables", icon::ARROW_CLOCKWISE)).clicked() {
-                requests.load_schema = Some(schema_name.to_string());
-                ui.close_menu();
-            }
-            if ui.button(format!("{}  Copy schema name", icon::COPY)).clicked() {
-                requests.copy_text = Some(schema_name.to_string());
-                ui.close_menu();
-            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let label = egui::Label::new(icon_text(
+                    icon::STACK,
+                    if is_active_schema {
+                        palette.accent
+                    } else {
+                        palette.icon_schema
+                    },
+                    schema_name,
+                    name_color,
+                    13.0,
+                ))
+                .truncate()
+                .sense(Sense::click());
+                let resp = ui.add(label).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    state.toggle(ui);
+                }
+                resp.context_menu(|ui| {
+                    ui.set_min_width(180.0);
+                    if ui.button(format!("{}  Set as active schema", icon::CHECK_CIRCLE)).clicked() {
+                        requests.set_active_schema = Some(schema_name.to_string());
+                        ui.close_menu();
+                    }
+                    if ui.button(format!("{}  Refresh tables", icon::ARROW_CLOCKWISE)).clicked() {
+                        requests.load_schema = Some(schema_name.to_string());
+                        ui.close_menu();
+                    }
+                    if ui.button(format!("{}  Copy schema name", icon::COPY)).clicked() {
+                        requests.copy_text = Some(schema_name.to_string());
+                        ui.close_menu();
+                    }
+                });
+            });
         });
-        if view.activity.loading_schemas.contains(schema_name) {
-            busy_indicator(ui, palette, "");
-        } else if schema.l1_loaded {
-            caption(ui, palette, schema.tables.len().to_string());
-        }
     });
 
     let schema_matches = contains_filter(schema_name, view.filter);

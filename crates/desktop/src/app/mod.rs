@@ -330,6 +330,10 @@ impl eframe::App for CottonDataApp {
         self.render_settings_modal(ctx, palette);
     }
 
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.theme.palette().bg_backdrop.to_normalized_gamma_f32()
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_sessions_now();
     }

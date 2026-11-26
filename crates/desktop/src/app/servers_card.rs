@@ -8,7 +8,7 @@ use crate::ui_kit::{
 use cottondata_core::{ConnectionStatus, ServerSlot, ServerSlotId};
 use eframe::egui::{self, collapsing_header::CollapsingState, Color32, CornerRadius, Margin, RichText, Sense};
 
-const SERVER_ROW_BADGE_WIDTH: f32 = 64.0;
+const SERVER_TITLE_MIN_WIDTH: f32 = 40.0;
 
 pub(super) enum ServerAction {
     Select(ServerSlotId),
@@ -34,7 +34,10 @@ impl CottonDataApp {
                 bottom: GUTTER,
             }))
             .show(ctx, |ui| {
+                let panel_w = ui.available_width();
+                ui.set_max_width(panel_w);
                 card_frame(palette).show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
                     ui.set_min_size(ui.available_size());
                     self.render_unified_explorer(ui, palette);
                 });
@@ -72,19 +75,23 @@ impl CottonDataApp {
         inset_frame(palette)
             .inner_margin(Margin::symmetric(8, 3))
             .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(palette.text_muted));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.explorer_filter)
-                            .hint_text("Filter servers, schemas, tables…")
-                            .frame(false)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if !self.explorer_filter.is_empty()
-                        && icon_button(ui, palette, icon::X, "Clear filter").clicked()
-                    {
-                        self.explorer_filter.clear();
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.explorer_filter.is_empty()
+                            && icon_button(ui, palette, icon::X, "Clear filter").clicked()
+                        {
+                            self.explorer_filter.clear();
+                        }
+                        let input_width = ui.available_width().max(40.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.explorer_filter)
+                                .hint_text("Filter servers, schemas, tables…")
+                                .frame(false)
+                                .desired_width(input_width),
+                        );
+                    });
                 });
             });
         ui.add_space(6.0);
@@ -103,10 +110,13 @@ impl CottonDataApp {
         let mut pending_server_action = None;
         let mut pending_nav = Vec::new();
 
+        let scroll_max_w = ui.available_width();
         egui::ScrollArea::vertical()
             .id_salt("unified_explorer_scroll")
+            .max_width(scroll_max_w)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.set_max_width(scroll_max_w);
                 for slot_id in slot_ids {
                     let Some(slot) = self.registry.get(slot_id) else {
                         continue;
@@ -260,7 +270,7 @@ fn render_server_tree_header(
         .corner_radius(CornerRadius::same(RADIUS_CONTROL))
         .inner_margin(Margin::symmetric(4, 3))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             ui.horizontal(|ui| {
                 state.show_toggle_button(ui, tree_toggle_icon);
                 if matches!(slot.status, ConnectionStatus::Connecting) {
@@ -268,69 +278,6 @@ fn render_server_tree_header(
                 } else {
                     status_dot(ui, status_color);
                 }
-                ui.scope(|ui| {
-                    ui.set_max_width((ui.available_width() - SERVER_ROW_BADGE_WIDTH - 24.0).max(40.0));
-                    let title = format!("{} {}", slot_id, slot.profile.name);
-                    let address = format!(
-                        "{}@{} ({})",
-                        slot.profile.username,
-                        slot.profile.endpoint.display_address(),
-                        slot.profile.engine.label()
-                    );
-                    let label = egui::Label::new(icon_text(
-                        icon::DATABASE,
-                        palette.icon_schema,
-                        &title,
-                        palette.text_primary,
-                        13.0,
-                    ))
-                    .truncate()
-                    .sense(Sense::click());
-                    let resp = ui
-                        .add(label)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text(address);
-                    if resp.double_clicked() {
-                        state.toggle(ui);
-                        if matches!(slot.status, ConnectionStatus::Disconnected | ConnectionStatus::Error(_)) {
-                            action = Some(ServerAction::Connect(slot_id));
-                        }
-                    } else if resp.clicked() {
-                        action = Some(ServerAction::Select(slot_id));
-                    }
-                    resp.context_menu(|ui| {
-                        ui.set_min_width(180.0);
-                        match &slot.status {
-                            ConnectionStatus::Connected => {
-                                if ui.button(format!("{}  Disconnect", icon::PLUGS_CONNECTED)).clicked() {
-                                    action = Some(ServerAction::Disconnect(slot_id));
-                                    ui.close_menu();
-                                }
-                            }
-                            ConnectionStatus::Connecting => {}
-                            _ => {
-                                if ui.button(format!("{}  Connect", icon::PLUG)).clicked() {
-                                    action = Some(ServerAction::Connect(slot_id));
-                                    state.set_open(true);
-                                    ui.close_menu();
-                                }
-                            }
-                        }
-                        if ui.button(format!("{}  New SQL Console", icon::TERMINAL_WINDOW)).clicked() {
-                            action = Some(ServerAction::NewConsole(slot_id));
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(format!("{}  Edit server…", icon::PENCIL_SIMPLE)).clicked() {
-                            action = Some(ServerAction::Edit(slot_id));
-                            ui.close_menu();
-                        }
-                        if ui.button(format!("{}  Remove server", icon::TRASH)).clicked() {
-                            action = Some(ServerAction::Remove(slot_id));
-                            ui.close_menu();
-                        }
-                    });
-                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     match &slot.status {
                         ConnectionStatus::Connected => {
@@ -351,6 +298,70 @@ fn render_server_tree_header(
                         slot.profile.environment.label(),
                         Color32::from_rgb(red, green, blue),
                     );
+                    let remaining_w = ui.available_width().max(SERVER_TITLE_MIN_WIDTH);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_max_width(remaining_w);
+                        let title = format!("{} {}", slot_id, slot.profile.name);
+                        let address = format!(
+                            "{}@{} ({})",
+                            slot.profile.username,
+                            slot.profile.endpoint.display_address(),
+                            slot.profile.engine.label()
+                        );
+                        let label = egui::Label::new(icon_text(
+                            icon::DATABASE,
+                            palette.icon_schema,
+                            &title,
+                            palette.text_primary,
+                            13.0,
+                        ))
+                        .truncate()
+                        .sense(Sense::click());
+                        let resp = ui
+                            .add(label)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(address);
+                        if resp.double_clicked() {
+                            state.toggle(ui);
+                            if matches!(slot.status, ConnectionStatus::Disconnected | ConnectionStatus::Error(_)) {
+                                action = Some(ServerAction::Connect(slot_id));
+                            }
+                        } else if resp.clicked() {
+                            action = Some(ServerAction::Select(slot_id));
+                        }
+                        resp.context_menu(|ui| {
+                            ui.set_min_width(180.0);
+                            match &slot.status {
+                                ConnectionStatus::Connected => {
+                                    if ui.button(format!("{}  Disconnect", icon::PLUGS_CONNECTED)).clicked() {
+                                        action = Some(ServerAction::Disconnect(slot_id));
+                                        ui.close_menu();
+                                    }
+                                }
+                                ConnectionStatus::Connecting => {}
+                                _ => {
+                                    if ui.button(format!("{}  Connect", icon::PLUG)).clicked() {
+                                        action = Some(ServerAction::Connect(slot_id));
+                                        state.set_open(true);
+                                        ui.close_menu();
+                                    }
+                                }
+                            }
+                            if ui.button(format!("{}  New SQL Console", icon::TERMINAL_WINDOW)).clicked() {
+                                action = Some(ServerAction::NewConsole(slot_id));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button(format!("{}  Edit server…", icon::PENCIL_SIMPLE)).clicked() {
+                                action = Some(ServerAction::Edit(slot_id));
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("{}  Remove server", icon::TRASH)).clicked() {
+                                action = Some(ServerAction::Remove(slot_id));
+                                ui.close_menu();
+                            }
+                        });
+                    });
                 });
             });
         })
