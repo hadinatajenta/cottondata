@@ -1,3 +1,10 @@
+mod sessions;
+
+pub use sessions::{
+    now_secs, ConnectedServerState, SessionSortOrder, SessionTabState, SessionsStore, WorkspaceSession,
+    DEFAULT_SESSION_ID, MAX_SESSIONS,
+};
+
 use cottondata_core::{ServerProfile, ServerRegistry, MAX_SERVERS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -60,6 +67,33 @@ impl AppStorage {
 
     fn history_path(&self) -> PathBuf {
         self.data_dir.join("history.json")
+    }
+
+    fn sessions_path(&self) -> PathBuf {
+        self.data_dir.join("sessions.json")
+    }
+
+    pub fn load_sessions(&self) -> SessionsStore {
+        let path = self.sessions_path();
+        let Ok(raw) = fs::read_to_string(path) else {
+            return SessionsStore::default();
+        };
+        let mut store: SessionsStore = serde_json::from_str(&raw).unwrap_or_default();
+        store.ensure_valid();
+        store
+    }
+
+    pub fn save_sessions(&self, store: &SessionsStore) -> io::Result<()> {
+        let payload = serde_json::to_string_pretty(store).map_err(io::Error::other)?;
+        let path = self.sessions_path();
+        let tmp = self.data_dir.join("sessions.json.tmp");
+        fs::write(&tmp, payload)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+        fs::rename(tmp, path)
     }
 
     pub fn load_registry(&self) -> io::Result<ServerRegistry> {
@@ -248,6 +282,86 @@ mod tests {
         let loaded = storage.load_registry().unwrap();
         assert_eq!(loaded.count(), 1);
         assert_eq!(loaded.profiles()[0].name, "Local MySQL");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persists_and_reloads_named_sessions_tabs_and_connections() {
+        let dir = std::env::temp_dir().join(format!(
+            "cottondata-sessions-test-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let storage = AppStorage::open_at(dir.clone()).unwrap();
+
+        let mut store = storage.load_sessions();
+        assert_eq!(store.active_session().name, "Default");
+        store.dark_theme = true;
+        store.show_system_schemas = true;
+
+        {
+            let active = store.active_session_mut();
+            active.active_server_id = Some("srv-prod-1".into());
+            active.tabs.push(SessionTabState {
+                id: 1,
+                title: "Console 1".into(),
+                server_id: Some("srv-prod-1".into()),
+                sql: "SELECT * FROM orders LIMIT 10;".into(),
+                cursor_byte: 12,
+                bound_table: None,
+                where_clause: String::new(),
+                order_by: None,
+                page_index: 0,
+                page_size: 500,
+            });
+            active.tabs.push(SessionTabState {
+                id: 2,
+                title: "shop.orders".into(),
+                server_id: Some("srv-prod-1".into()),
+                sql: "SELECT * FROM `shop`.`orders` LIMIT 500 OFFSET 0;".into(),
+                cursor_byte: 0,
+                bound_table: Some(("shop".into(), "orders".into())),
+                where_clause: "status = 'paid'".into(),
+                order_by: Some(("id".into(), SessionSortOrder::Desc)),
+                page_index: 2,
+                page_size: 500,
+            });
+            active.connected_servers.push(ConnectedServerState {
+                server_id: "srv-prod-1".into(),
+                active_schema: Some("shop".into()),
+                autocommit: false,
+            });
+            active.active_tab_idx = 1;
+            active.next_tab_id = 3;
+        }
+
+        let dup_id = store.duplicate_active_session("Analytics").unwrap();
+        assert_eq!(store.active_session_id, dup_id);
+        assert_eq!(store.sessions.len(), 2);
+        assert_eq!(store.active_session().tabs.len(), 2);
+
+        store.rename_session(&dup_id, "Analytics Prod").unwrap();
+        storage.save_sessions(&store).unwrap();
+
+        let mut reloaded = storage.load_sessions();
+        assert!(reloaded.dark_theme);
+        assert!(reloaded.show_system_schemas);
+        assert_eq!(reloaded.active_session().name, "Analytics Prod");
+        assert_eq!(reloaded.active_session().tabs[0].sql, "SELECT * FROM orders LIMIT 10;");
+        assert_eq!(
+            reloaded.active_session().tabs[1].order_by,
+            Some(("id".into(), SessionSortOrder::Desc))
+        );
+        assert_eq!(reloaded.active_session().connected_servers.len(), 1);
+        assert_eq!(
+            reloaded.active_session().connected_servers[0].active_schema.as_deref(),
+            Some("shop")
+        );
+        assert!(!reloaded.active_session().connected_servers[0].autocommit);
+
+        reloaded.delete_session(&dup_id).unwrap();
+        assert_eq!(reloaded.sessions.len(), 1);
+        assert!(reloaded.delete_session(DEFAULT_SESSION_ID).is_err());
+
         let _ = fs::remove_dir_all(dir);
     }
 }
