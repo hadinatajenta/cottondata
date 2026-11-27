@@ -1,4 +1,4 @@
-use super::{icon, icon_button, icon_text};
+use super::{icon, icon_button, icon_text, wrap_before_if_needed};
 use crate::theme::{Palette, RADIUS_CONTROL};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Margin, Response, RichText, Sense, Stroke, StrokeKind, Ui,
@@ -40,6 +40,7 @@ pub fn styled_text_input(
         Stroke::new(1.0, palette.border)
     };
     let inner_width = (width - 20.0).max(0.0);
+    wrap_before_if_needed(ui, width);
 
     egui::Frame::new()
         .fill(palette.bg_surface)
@@ -134,6 +135,22 @@ pub fn segmented_tabs<T: Copy + PartialEq>(
     current: &mut T,
     items: &[(T, &str, &str)],
 ) {
+    let estimated_width: f32 = ui.fonts(|fonts| {
+        let items_w: f32 = items
+            .iter()
+            .map(|&(_, glyph, label)| {
+                let job = if glyph.is_empty() {
+                    icon_text(label, Color32::PLACEHOLDER, "", Color32::PLACEHOLDER, 12.5)
+                } else {
+                    icon_text(glyph, Color32::PLACEHOLDER, label, Color32::PLACEHOLDER, 12.5)
+                };
+                fonts.layout_job(job).size().x + 22.0
+            })
+            .sum();
+        items_w + (items.len().saturating_sub(1) as f32 * 3.0) + 8.0
+    });
+    wrap_before_if_needed(ui, estimated_width);
+
     egui::Frame::new()
         .fill(palette.bg_surface)
         .stroke(Stroke::new(1.0, palette.border))

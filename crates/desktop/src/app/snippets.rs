@@ -3,7 +3,7 @@ use crate::theme::{highlight_mysql_editor_layout, Palette, RADIUS_CONTROL};
 use crate::ui_kit::{
     banner, caption, empty_state, field_label, ghost_button, icon, icon_button, icon_text, inset_frame, modal_shell,
     pill, primary_button, secondary_button, segmented_tabs, styled_text_input, tinted_ghost_button, toggle_card,
-    ModalConfig,
+    wrap_before_if_needed, ModalConfig,
 };
 use cottondata_storage::{SavedQuery, SnippetScope, SnippetScopeFilter};
 use eframe::egui::{self, CornerRadius, FontFamily, FontId, Margin, RichText};
@@ -96,6 +96,7 @@ impl CottonDataApp {
                 .as_deref()
                 .unwrap_or("All folders")
                 .to_string();
+            wrap_before_if_needed(ui, 140.0);
             egui::ComboBox::from_id_salt("snippet_folder_filter_combo")
                 .truncate()
                 .selected_text(icon_text(icon::FOLDER, p.text_muted, &folder_label, p.text_primary, 12.5))

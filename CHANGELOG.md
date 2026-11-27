@@ -2,6 +2,11 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.12.1] — 2026-11-27
+
+### Fixed
+- **Data Grid toolbar giant vertical white gap on wide displays (e.g. MacBook Pro M1 Pro)**: removed the nested `ui.scope` wrapper inside `with_ghost_visuals` (`ghost_button`, `tinted_ghost_button`, `icon_button`), rendered `pill` badges atomically without a nested `Frame` child `Ui`, replaced `ui.add_enabled_ui` inside wrapped toolbars with `icon_button_enabled`, forced single-line `TextWrapMode::Extend` on toolbar buttons/labels, and pre-wrapped `ComboBox` / `styled_text_input` / `segmented_tabs` inside `ui.horizontal_wrapped`. Previously, when a button like `+ Row`, `Filter`, or `Row list` landed at the right edge of a wrapped toolbar row, its text collapsed one character per line vertically and inflated both Row 1 and Row 2 into a large white gap.
+
 ## [0.12.0] — 2026-11-27
 
 ### Added

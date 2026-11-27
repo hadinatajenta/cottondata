@@ -11,8 +11,8 @@ use crate::theme::{
     RADIUS_CONTROL,
 };
 use crate::ui_kit::{
-    banner, caption, ghost_button, icon, icon_button, inset_frame, primary_button, secondary_button,
-    styled_text_input, tinted_ghost_button, toolbar_divider,
+    banner, caption, ghost_button, icon, icon_button, icon_button_enabled, inset_frame, primary_button,
+    secondary_button, styled_text_input, tinted_ghost_button, toolbar_divider,
 };
 use crate::worker::SlotCmd;
 use cottondata_sql::{
@@ -1607,22 +1607,12 @@ impl CottonDataApp {
                     caption(ui, p, count_text);
                 }
 
-                if ui
-                    .add_enabled_ui(!matches.is_empty(), |ui| {
-                        icon_button(ui, p, icon::ARROW_UP, "Previous match (Shift+Enter)")
-                    })
-                    .inner
+                if icon_button_enabled(ui, p, icon::ARROW_UP, "Previous match (Shift+Enter)", !matches.is_empty())
                     .clicked()
                 {
                     step_prev = true;
                 }
-                if ui
-                    .add_enabled_ui(!matches.is_empty(), |ui| {
-                        icon_button(ui, p, icon::ARROW_DOWN, "Next match (Enter)")
-                    })
-                    .inner
-                    .clicked()
-                {
+                if icon_button_enabled(ui, p, icon::ARROW_DOWN, "Next match (Enter)", !matches.is_empty()).clicked() {
                     step_next = true;
                 }
 
@@ -1865,7 +1855,8 @@ fn render_diagnostic_popover(
                                 )
                                 .fill(p.accent_soft)
                                 .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.5)))
-                                .corner_radius(CornerRadius::same(RADIUS_CONTROL));
+                                .corner_radius(CornerRadius::same(RADIUS_CONTROL))
+                                .wrap_mode(egui::TextWrapMode::Extend);
                                 if ui.add(btn).clicked() {
                                     chosen_fix = Some(fix.clone());
                                 }

@@ -2,8 +2,8 @@ use super::query_tab::{limit_label, RecordViewState, TABLE_PAGE_SIZE_PRESETS};
 use super::{ActiveStreamExport, CottonDataApp, PendingDiscardAction};
 use crate::theme::Palette;
 use crate::ui_kit::{
-    busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_text, inset_frame, pill,
-    primary_button, tinted_ghost_button, toolbar_divider,
+    busy_indicator, caption, document_tab, ghost_button, icon, icon_button, icon_button_enabled, icon_text,
+    inset_frame, pill, primary_button, tinted_ghost_button, toolbar_divider, wrap_before_if_needed,
 };
 use crate::worker::SlotCmd;
 use cottondata_grid::{export_rows, ExportFormat, SortDirection, SqlInsertTarget};
@@ -92,7 +92,7 @@ impl CottonDataApp {
                     sql_editor_toggled = true;
                 }
                 toolbar_divider(ui, p);
-                ui.label(icon_text(icon::FUNNEL, p.accent, "WHERE", p.text_muted, 11.5));
+                ui.add(egui::Label::new(icon_text(icon::FUNNEL, p.accent, "WHERE", p.text_muted, 11.5)).extend());
                 let filter_resp = ui.add(
                     egui::TextEdit::singleline(&mut tab.filter_sort.where_clause)
                         .hint_text("status = 'active' AND id > 100")
@@ -105,23 +105,23 @@ impl CottonDataApp {
                 }
                 toolbar_divider(ui, p);
                 let has_previous = tab.filter_sort.page_index > 0 && !is_busy;
-                if ui
-                    .add_enabled_ui(has_previous, |ui| icon_button(ui, p, icon::CARET_LEFT, "Previous page"))
-                    .inner
-                    .clicked()
-                {
+                if icon_button_enabled(ui, p, icon::CARET_LEFT, "Previous page", has_previous).clicked() {
                     reload_page_idx = Some(tab.filter_sort.page_index - 1);
                 }
-                caption(ui, p, format!("Page {}", tab.filter_sort.page_index + 1));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Page {}", tab.filter_sort.page_index + 1))
+                            .size(11.5)
+                            .color(p.text_muted),
+                    )
+                    .extend(),
+                );
                 let has_more = !is_busy && tab.page.as_ref().map(|pg| pg.has_more_rows).unwrap_or(false);
-                if ui
-                    .add_enabled_ui(has_more, |ui| icon_button(ui, p, icon::CARET_RIGHT, "Next page"))
-                    .inner
-                    .clicked()
-                {
+                if icon_button_enabled(ui, p, icon::CARET_RIGHT, "Next page", has_more).clicked() {
                     reload_page_idx = Some(tab.filter_sort.page_index + 1);
                 }
                 let cur_page_size = tab.filter_sort.page_size.max(20);
+                wrap_before_if_needed(ui, 108.0);
                 egui::ComboBox::from_id_salt(("table_page_size", tab.id))
                     .selected_text(
                         RichText::new(format!("{} rows", limit_label(cur_page_size)))
@@ -166,7 +166,9 @@ impl CottonDataApp {
                 return;
             }
 
-            toolbar_divider(ui, p);
+            if bound_table.is_some() {
+                toolbar_divider(ui, p);
+            }
             if let Some(target) = editability.target() {
                 if bound_table.is_none() {
                     pill(ui, &format!("EDIT {}", target.table), p.success);
@@ -249,7 +251,8 @@ impl CottonDataApp {
                     }
                 }
             } else if let Some(reason) = editability.reason() {
-                caption(ui, p, "Read-only").on_hover_text(reason.message());
+                ui.add(egui::Label::new(RichText::new("Read-only").size(11.5).color(p.text_muted)).extend())
+                    .on_hover_text(reason.message());
             }
 
             toolbar_divider(ui, p);
@@ -313,6 +316,7 @@ impl CottonDataApp {
                             .page
                             .as_ref()
                             .is_some_and(|pg| !pg.executed_sql.trim().is_empty()));
+                wrap_before_if_needed(ui, 118.0);
                 egui::ComboBox::from_id_salt("export_menu")
                     .selected_text(icon_text(icon::EXPORT, p.accent, "Export", p.text_primary, 13.0))
                     .width(110.0)
