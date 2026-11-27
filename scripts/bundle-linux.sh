@@ -58,7 +58,7 @@ Section: database
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: Hadinata <hadinata.jenta@sharingvision.co.id>
-Description: Featherweight native Rust client for MySQL and SQL Server
+Description: Featherweight native Rust client for MySQL, PostgreSQL, CockroachDB, SQL Server, and SQLite
  CottonData is a low-RAM desktop and CLI database client written in Rust.
 CTRL
   DEB_PATH="$DIST_DIR/cottondata_${VERSION}_${DEB_ARCH}.deb"

@@ -2,6 +2,7 @@ use super::er_diagram::ErRelation;
 use super::query_tab::{result_set_label, BottomDeckTab, StoredResultSet};
 use super::row_selection::RowSelection;
 use super::server_form::ConnectionTestState;
+use super::sql_fold::{fnv1a64 as fold_fnv1a64, QueryExecOutcome};
 use super::update_modal::UpdateStatus;
 use super::CottonDataApp;
 use crate::updater::ApplyOutcome;
@@ -9,6 +10,7 @@ use crate::worker::{SlotCmd, WorkerEvent};
 use cottondata_core::ConnectionStatus;
 use cottondata_driver::QueryOutcome;
 use cottondata_grid::{ColumnarPage, StagedMutator};
+use cottondata_sql::resolve_server_error_diagnostic;
 use cottondata_storage::ConnectedServerState;
 use eframe::egui;
 use std::sync::atomic::Ordering;
@@ -103,7 +105,19 @@ impl CottonDataApp {
                             }
                         }
                     }
+                    let mut handled_inline_in_active_editor = false;
                     if let Some(tid) = tab_id {
+                        let dialect = self.slot_dialect(Some(slot));
+                        let active_db = self
+                            .registry
+                            .get(slot)
+                            .and_then(|sl| sl.runtime.as_ref())
+                            .and_then(|r| r.current_schema.as_deref());
+                        let hints = self.catalogs[slot.index()]
+                            .as_ref()
+                            .map(|cat| cat.completion_hints(active_db))
+                            .unwrap_or_default();
+                        let active_tab_id = self.tabs.get(self.active_tab_idx).map(|t| t.id);
                         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tid) {
                             let was_loading_more = tab.is_loading_more;
                             tab.is_running = false;
@@ -114,12 +128,39 @@ impl CottonDataApp {
                             if was_loading_more {
                                 tab.scroll_fetch_failed = true;
                             } else {
-                                tab.last_status_msg = format!("Error: {msg}");
+                                let stmt_span = tab.last_executed_span.unwrap_or((0, tab.sql.len()));
+                                if let Some(diag) = resolve_server_error_diagnostic(
+                                    &tab.sql,
+                                    stmt_span,
+                                    &error.diagnostic,
+                                    dialect,
+                                    &hints,
+                                ) {
+                                    let spans = cottondata_sql::compute_line_spans(&tab.sql);
+                                    let err_line = cottondata_sql::line_index_for_byte(&spans, diag.start_byte) + 1;
+                                    tab.last_status_msg = format!("Query failed · Line {err_line}");
+                                    tab.fold_state.unfold_enclosing_byte(&tab.sql, dialect, diag.start_byte);
+                                    tab.server_diagnostic_sql_hash = fold_fnv1a64(tab.sql.as_bytes());
+                                    tab.server_diagnostic = Some(diag);
+                                    if tab.show_sql_editor && active_tab_id == Some(tid) {
+                                        handled_inline_in_active_editor = true;
+                                    }
+                                } else {
+                                    tab.last_status_msg = format!("Error: {}", error.diagnostic.summary);
+                                }
+                                tab.record_exec_outcome(
+                                    QueryExecOutcome::Failed,
+                                    error.diagnostic.summary.clone(),
+                                );
                             }
                         }
                     }
                     self.after_save_action = None;
-                    self.notify_error(msg);
+                    if handled_inline_in_active_editor {
+                        self.clear_error_toast();
+                    } else {
+                        self.notify_error(msg);
+                    }
                 }
                 WorkerEvent::CatalogUpdated { slot, catalog } => {
                     self.catalogs[slot.index()] = Some(catalog);
@@ -262,6 +303,11 @@ impl CottonDataApp {
                                     tab.active_result_idx = 0;
                                 }
                                 tab.page = Some(page_arc);
+                                tab.server_diagnostic = None;
+                                tab.record_exec_outcome(
+                                    QueryExecOutcome::Succeeded,
+                                    tab.last_status_msg.clone(),
+                                );
                                 tab.bump_page_generation();
                                 tab.column_widths.clear();
                                 tab.row_selection.clear();
@@ -285,6 +331,11 @@ impl CottonDataApp {
                                     .unwrap_or_default();
                                 tab.last_status_msg = format!(
                                     "OK · {affected_rows} rows affected{lid} · {warnings} warnings · {elapsed_ms} ms"
+                                );
+                                tab.server_diagnostic = None;
+                                tab.record_exec_outcome(
+                                    QueryExecOutcome::Succeeded,
+                                    tab.last_status_msg.clone(),
                                 );
                                 self.history =
                                     self.storage
@@ -494,6 +545,11 @@ impl CottonDataApp {
                         if !stored_sets.is_empty() {
                             let count = stored_sets.len();
                             tab.set_result_sets(stored_sets);
+                            tab.server_diagnostic = None;
+                            tab.record_exec_outcome(
+                                QueryExecOutcome::Succeeded,
+                                format!("Script OK · {count} result set(s) · {total_ms} ms"),
+                            );
                             let evicted = self
                                 .memory_budget
                                 .record_allocation(format!("tab-{}", tab.id), total_bytes);
@@ -508,6 +564,11 @@ impl CottonDataApp {
                             tab.last_status_msg = format!(
                                 "Script OK · {} ({total_ms} ms)",
                                 affected_summary.join(" · ")
+                            );
+                            tab.server_diagnostic = None;
+                            tab.record_exec_outcome(
+                                QueryExecOutcome::Succeeded,
+                                tab.last_status_msg.clone(),
                             );
                             self.clear_error_toast();
                         }

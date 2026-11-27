@@ -351,6 +351,7 @@ mod tests {
                 page_index: 0,
                 page_size: 500,
                 show_sql_editor: Some(true),
+                folded_start_lines: vec![0],
             });
             active.tabs.push(SessionTabState {
                 id: 2,
@@ -364,6 +365,7 @@ mod tests {
                 page_index: 2,
                 page_size: 500,
                 show_sql_editor: Some(false),
+                folded_start_lines: Vec::new(),
             });
             active.editor_height = 360;
             active.connected_servers.push(ConnectedServerState {

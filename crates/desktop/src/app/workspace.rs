@@ -16,6 +16,7 @@ const RESULT_TABS: [(BottomDeckTab, &str, &str); 6] = [
 
 const TOAST_WIDTH: f32 = 380.0;
 const TOAST_EDGE_OFFSET: f32 = 16.0;
+const TOAST_TOP_OFFSET: f32 = 42.0;
 
 impl CottonDataApp {
     fn render_toast_overlay(&mut self, ctx: &egui::Context, panel_rect: egui::Rect, palette: Palette) {
@@ -30,10 +31,10 @@ impl CottonDataApp {
             ToastKind::Error => (palette.danger, icon::WARNING),
         };
         let toast_width = TOAST_WIDTH.min(panel_rect.width() - TOAST_EDGE_OFFSET * 2.0).max(160.0);
-        let anchor = panel_rect.right_bottom() - egui::vec2(TOAST_EDGE_OFFSET, TOAST_EDGE_OFFSET);
+        let anchor = panel_rect.right_top() + egui::vec2(-TOAST_EDGE_OFFSET, TOAST_TOP_OFFSET);
         let state = egui::Area::new(egui::Id::new("toast_overlay"))
             .order(egui::Order::Foreground)
-            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .pivot(egui::Align2::RIGHT_TOP)
             .fixed_pos(anchor)
             .interactable(true)
             .show(ctx, |ui| {

@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-cli"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-core"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-desktop"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-driver"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-grid",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-grid"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "serde",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-introspect"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-mssql"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "cottondata-core",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-mysql"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-postgres"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -926,14 +926,14 @@ dependencies = [
 
 [[package]]
 name = "cottondata-sql"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
 ]
 
 [[package]]
 name = "cottondata-sqlite"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "cottondata-driver",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "cottondata-storage"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cottondata-core",
  "serde",

@@ -11,18 +11,38 @@ REPO="hadinatajenta/cottondata"
 echo "==> Building macOS release bundle for ${TAG}..."
 ./scripts/bundle-macos.sh
 
-ZIP_PATH="dist/CottonData-macos-arm64.zip"
-DMG_PATH="dist/CottonData-macos-arm64.dmg"
 SUMS_PATH="dist/SHA256SUMS.txt"
+shopt -s nullglob
+ASSETS=(
+  dist/CottonData-macos-*.zip
+  dist/CottonData-macos-*.dmg
+  dist/CottonData-windows-*.zip
+  dist/CottonData-setup-windows-*.exe
+  dist/CottonData-linux-*.tar.gz
+  dist/cottondata_*.deb
+)
+shopt -u nullglob
 
-(cd dist && shasum -a 256 "$(basename "$ZIP_PATH")" "$(basename "$DMG_PATH")" > "$(basename "$SUMS_PATH")")
+if [[ "${#ASSETS[@]}" -eq 0 ]]; then
+  echo "No release assets found in dist/" >&2
+  exit 1
+fi
+
+(
+  cd dist
+  rm -f SHA256SUMS.txt
+  for asset in "${ASSETS[@]}"; do
+    shasum -a 256 "$(basename "$asset")" >> SHA256SUMS.txt
+  done
+)
 cat "$SUMS_PATH"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo ""
   echo "Artifacts ready in dist/:"
-  echo "  - $ZIP_PATH"
-  echo "  - $DMG_PATH"
+  for asset in "${ASSETS[@]}"; do
+    echo "  - $asset"
+  done
   echo "  - $SUMS_PATH"
   echo ""
   echo "Install GitHub CLI (brew install gh && gh auth login) to upload automatically,"
@@ -30,13 +50,33 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 0
 fi
 
+NOTES_FILE="$(mktemp)"
+trap 'rm -f "$NOTES_FILE"' EXIT
+if [[ -f CHANGELOG.md ]]; then
+  awk -v ver="$VERSION" '
+    index($0, "## [" ver "]") == 1 { found=1; next }
+    found && /^## \[/ { exit }
+    found { print }
+  ' CHANGELOG.md > "$NOTES_FILE"
+fi
+
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "==> Updating existing GitHub release ${TAG}..."
-  gh release upload "$TAG" "$ZIP_PATH" "$DMG_PATH" "$SUMS_PATH" --repo "$REPO" --clobber
+  gh release upload "$TAG" "${ASSETS[@]}" "$SUMS_PATH" --repo "$REPO" --clobber
+  if [[ -s "$NOTES_FILE" ]] && grep -q '[^[:space:]]' "$NOTES_FILE"; then
+    gh release edit "$TAG" --repo "$REPO" --title "CottonData ${TAG}" --notes-file "$NOTES_FILE"
+  fi
 else
   echo "==> Creating GitHub release ${TAG}..."
-  gh release create "$TAG" "$ZIP_PATH" "$DMG_PATH" "$SUMS_PATH" \
-    --repo "$REPO" \
-    --title "CottonData ${TAG}" \
-    --generate-notes
+  if [[ -s "$NOTES_FILE" ]] && grep -q '[^[:space:]]' "$NOTES_FILE"; then
+    gh release create "$TAG" "${ASSETS[@]}" "$SUMS_PATH" \
+      --repo "$REPO" \
+      --title "CottonData ${TAG}" \
+      --notes-file "$NOTES_FILE"
+  else
+    gh release create "$TAG" "${ASSETS[@]}" "$SUMS_PATH" \
+      --repo "$REPO" \
+      --title "CottonData ${TAG}" \
+      --generate-notes
+  fi
 fi

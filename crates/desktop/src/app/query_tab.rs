@@ -1,10 +1,11 @@
 use super::completion_popup::CompletionPopupState;
 use super::grid_filter::GridFilterState;
 use super::row_selection::RowSelection;
+use super::sql_fold::{fnv1a64 as fold_fnv1a64, QueryExecIndicator, QueryExecOutcome, SqlFoldState, SqlLintCache, SqlUndoStack};
 use cottondata_core::{ServerSlotId, SqlDialect, DEFAULT_PAGE_SIZE, UNLIMITED_ROWS};
 use cottondata_driver::ExplainResult;
 use cottondata_grid::{CellValue, ColumnarPage, PageFilterSort, SortDirection, StagedMutator};
-use cottondata_sql::{find_matches, SearchOptions};
+use cottondata_sql::{compute_line_spans, find_matches, line_index_for_byte, SearchOptions, SqlDiagnostic};
 use cottondata_storage::{SessionSortOrder, SessionTabState};
 use std::sync::Arc;
 
@@ -193,6 +194,16 @@ pub(super) struct QueryTab {
     pub(super) find_replace: FindReplaceState,
     pub(super) completion_popup: CompletionPopupState,
     pub(super) pending_cursor_range: Option<(usize, usize)>,
+    pub(super) fold_state: SqlFoldState,
+    pub(super) undo_stack: SqlUndoStack,
+    pub(super) lint_cache: SqlLintCache,
+    pub(super) server_diagnostic: Option<SqlDiagnostic>,
+    pub(super) server_diagnostic_sql_hash: u64,
+    pub(super) last_executed_span: Option<(usize, usize)>,
+    pub(super) last_executed_stmt_spans: Vec<(usize, usize)>,
+    pub(super) exec_indicators: Vec<QueryExecIndicator>,
+    pub(super) last_exec_outcome: Option<QueryExecOutcome>,
+    pub(super) quick_fix_popover_byte: Option<usize>,
 }
 
 impl QueryTab {
@@ -244,6 +255,16 @@ impl QueryTab {
             find_replace: FindReplaceState::default(),
             completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
+            fold_state: SqlFoldState::default(),
+            undo_stack: SqlUndoStack::default(),
+            lint_cache: SqlLintCache::default(),
+            server_diagnostic: None,
+            server_diagnostic_sql_hash: 0,
+            last_executed_span: None,
+            last_executed_stmt_spans: Vec::new(),
+            exec_indicators: Vec::new(),
+            last_exec_outcome: None,
+            quick_fix_popover_byte: None,
         }
     }
 
@@ -304,6 +325,16 @@ impl QueryTab {
             find_replace: FindReplaceState::default(),
             completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
+            fold_state: SqlFoldState::default(),
+            undo_stack: SqlUndoStack::default(),
+            lint_cache: SqlLintCache::default(),
+            server_diagnostic: None,
+            server_diagnostic_sql_hash: 0,
+            last_executed_span: None,
+            last_executed_stmt_spans: Vec::new(),
+            exec_indicators: Vec::new(),
+            last_exec_outcome: None,
+            quick_fix_popover_byte: None,
         }
     }
 
@@ -375,6 +406,16 @@ impl QueryTab {
             find_replace: FindReplaceState::default(),
             completion_popup: CompletionPopupState::default(),
             pending_cursor_range: None,
+            fold_state: SqlFoldState::from_saved_lines(&state.folded_start_lines),
+            undo_stack: SqlUndoStack::default(),
+            lint_cache: SqlLintCache::default(),
+            server_diagnostic: None,
+            server_diagnostic_sql_hash: 0,
+            last_executed_span: None,
+            last_executed_stmt_spans: Vec::new(),
+            exec_indicators: Vec::new(),
+            last_exec_outcome: None,
+            quick_fix_popover_byte: None,
         }
     }
 
@@ -398,7 +439,44 @@ impl QueryTab {
             page_index: self.filter_sort.page_index,
             page_size: self.filter_sort.page_size,
             show_sql_editor: Some(self.show_sql_editor),
+            folded_start_lines: self.fold_state.saved_lines(),
         }
+    }
+
+    pub(super) fn record_exec_outcome(&mut self, outcome: QueryExecOutcome, summary: String) {
+        self.last_exec_outcome = Some(outcome);
+        let spans = compute_line_spans(&self.sql);
+        let target_spans: Vec<(usize, usize)> = if !self.last_executed_stmt_spans.is_empty() {
+            self.last_executed_stmt_spans.clone()
+        } else if let Some(span) = self.last_executed_span {
+            vec![span]
+        } else {
+            vec![(0, self.sql.len())]
+        };
+
+        for (start_byte, _) in target_spans {
+            let line = line_index_for_byte(&spans, start_byte.min(self.sql.len()));
+            if let Some(existing) = self.exec_indicators.iter_mut().find(|ind| ind.start_line == line) {
+                existing.outcome = outcome;
+                existing.summary = summary.clone();
+            } else {
+                self.exec_indicators.push(QueryExecIndicator {
+                    start_line: line,
+                    outcome,
+                    summary: summary.clone(),
+                });
+            }
+        }
+    }
+
+    pub(super) fn invalidate_stale_exec_state_on_edit(&mut self) {
+        let current_hash = fold_fnv1a64(self.sql.as_bytes());
+        if self.server_diagnostic.is_some() && self.server_diagnostic_sql_hash != current_hash {
+            self.server_diagnostic = None;
+        }
+        self.exec_indicators.clear();
+        self.last_exec_outcome = None;
+        self.quick_fix_popover_byte = None;
     }
 
     pub(super) fn insert_target_table(&self) -> String {

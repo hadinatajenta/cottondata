@@ -19,7 +19,7 @@ Every block is non-interactive, needs no `sudo` unless noted, and ends with a ch
 | OS | CPU | Method | Section |
 |---|---|---|---|
 | macOS 12+ | Apple Silicon (`arm64`) | Prebuilt release | [macOS Apple Silicon](#macos-apple-silicon-prebuilt) |
-| macOS 12+ | Intel (`x86_64`) | Build from source | [macOS Intel](#macos-intel-build-from-source) |
+| macOS 12+ | Intel (`x86_64`) | Prebuilt release / source | [macOS Intel](#macos-intel-build-from-source) |
 | Linux | `x86_64` or `aarch64` | Build from source | [Linux](#linux-build-from-source) |
 | Windows 10/11 | `x86_64` | Prebuilt release | [Windows](#windows-prebuilt) |
 
@@ -40,8 +40,10 @@ latest_release_page: https://github.com/hadinatajenta/cottondata/releases/latest
 prebuilt_assets:
   macos_arm64_zip: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-arm64.zip
   macos_arm64_dmg: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-arm64.dmg
+  macos_x64_zip: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-x64.zip
+  macos_x64_dmg: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-macos-x64.dmg
   windows_x64_zip: https://github.com/hadinatajenta/cottondata/releases/latest/download/CottonData-windows-x64.zip
-prebuilt_platforms: [macos-arm64, windows-x86_64]
+prebuilt_platforms: [macos-arm64, macos-x86_64, windows-x86_64]
 build_from_source_platforms: [macos-x86_64, linux-x86_64, linux-aarch64, windows-x86_64]
 minimum_rust: "1.88"
 gui_binary: CottonData            # CottonData.exe on Windows
@@ -77,7 +79,7 @@ Verify:
 
 ```bash
 /Applications/CottonData.app/Contents/MacOS/cottondata-cli doctor | head -1
-# CottonData CLI v0.11.1
+# CottonData CLI v0.12.0
 open /Applications/CottonData.app
 ```
 
@@ -185,7 +187,7 @@ Verify:
 ```
 
 The portable build lives in `dist\CottonData-windows-x64\` and is zipped to `dist\CottonData-windows-x64.zip`.
-With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\installer-windows.iss` produces an installer.
+With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\installer-windows.iss` produces `dist\CottonData-setup-windows-x64.exe`.
 
 ### Troubleshooting builds
 
@@ -204,18 +206,20 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 - **Five engines in one native app** — MySQL 5.7 / 8.x / 9.x / MariaDB, **PostgreSQL 9.6+** (including Supabase, Neon, TimescaleDB), **CockroachDB** (self-hosted and Cloud), SQL Server 2012+ with SQL login, and **SQLite** database files.
 - **PostgreSQL & CockroachDB done properly**: large `SELECT`s are read through a server-side cursor (PostgreSQL) or cancelled as soon as the page is full (CockroachDB), so `SELECT * FROM huge_table` never streams millions of rows. Inline editing works on single-table `SELECT` results (origin table, primary key, and nullability come from the row description). `$$` function bodies, `::` casts, JSONB `#>`/`?` operators, booleans shown as `true`/`false`, `bytea` shown as `\x…`, server-side Read-Only (`default_transaction_read_only`), manual-commit mode, savepoint-safe grid saves inside open transactions, `EXPLAIN (ANALYZE, BUFFERS)` that rolls back data changes, Stop via the native cancel protocol, `pg_get_*def`-accurate DDL, `pg_stat_activity` process list, unix sockets, `sslmode`/`sslrootcert` URLs, and actionable SQLSTATE errors with line/column positions.
 - **SQLite**: open or create `.db` / `.sqlite` files (or paste a path / `sqlite:` URL), attached databases as schemas, foreign keys enforced, true row limits without full scans, editable results, triggers listed, `EXPLAIN QUERY PLAN` tree, Stop via interrupt, and clear guidance when an `ALTER TABLE` change needs a table rebuild.
-- **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), and filters across servers with viewport culling for schemas containing hundreds of tables.
-- **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `postgres://`, `postgresql://`, `cockroachdb://`, `mssql://`, `sqlserver://`, `sqlite:` or a bare `.db` path), show/hide password, Unix sockets (MySQL and PostgreSQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`), and per-server **Read-Only Guard**.
+- **Unified Database Explorer**: single tree combining saved servers, schemas/databases, tables, views, routines, and columns. Auto-connects on expand, supports right-click actions (including *Duplicate server*), filters across servers with viewport culling for schemas containing hundreds of tables, lets you drag servers by their grip handle to reorder them, and opens a **Quick Switcher** (`Cmd/Ctrl+K`) across servers, schemas, and tables.
+- **Connections & Setup Modal**: tabbed **General / Security & TLS / SSH Tunnel** dialog with live **Test Connection** (latency + server version), **Paste Connection URL** (`mysql://`, `mariadb://`, `postgres://`, `postgresql://`, `cockroachdb://`, `mssql://`, `sqlserver://`, `sqlite:` or a bare `.db` path), show/hide password, Unix sockets (MySQL and PostgreSQL), all TLS modes (`Disabled` through `Verify Identity`), color-coded environment badges (`LOCAL` / `DEV` / `STAGING` / `PROD`, or a custom label of up to 24 characters with one of 8 colors), and per-server **Read-Only Guard**.
 - **Configurable server list**: 1 to 64 saved servers (default 10) from Settings. Saved servers cost almost no memory; only connected servers use RAM. `Cmd/Ctrl+1..0` switches the first ten.
-- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), **Parameterized Queries** (`:user_id`, `?`) with a pre-run value dialog & per-query value memory, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware **autocomplete popup** at the caret (`↑/↓`, `Enter`/`Tab`, `Esc`, `Ctrl+Space`), and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **SQL Console & Multi-Result Tabs**: line-numbered syntax-highlighted editor with **DataGrip-style Code Folding** (multi-line statements, clauses, CTEs, subqueries, `CASE`/`BEGIN` blocks, comments, `-- region`, hover scope guides, and inline preview pills), **live SQL error highlighting & 1-click Quick Fixes** (static linter + schema fuzzy suggestions + server error squiggles across all five engines), per-query **✓ / ✗ execution indicators** in the gutter and toolbar, **Find & Replace** (`Cmd/Ctrl+F` / `Cmd/Ctrl+H`) with live match highlights, line-editing shortcuts (`Cmd/Ctrl+/` comment, `Cmd/Ctrl+Shift+D` duplicate, `Alt+↑/↓` move lines), **Parameterized Queries** (`:user_id`, `?`) with a pre-run value dialog & per-query value memory, draggable horizontal splitter + expand toggle, **Run at cursor / selection** (`Cmd/Ctrl+Enter`), **Run all statements** (`Cmd/Ctrl+Shift+Enter`) into independent **Result 1 / Result 2 / …** sub-tabs, SQL formatter, schema-aware **autocomplete popup** at the caret (`↑/↓`, `Enter`/`Tab`, `Esc`, `Ctrl+Space`), and safety warnings for unqualified `UPDATE`/`DELETE`, `DROP`, and `TRUNCATE`.
+- **Auto-Limited Queries & Infinite Scroll**: unbounded `SELECT`s get a server-side row cap (100 by default; the toolbar `Limit` selector offers 50, 100, 200, 500, 1,000, or Unlimited) and the next batch loads as you scroll to the end. Click a column header to cycle sort `DESC → ASC → Default`, done in memory once every row is loaded and with a server-side `ORDER BY` otherwise.
 - **Searchable History & Saved Queries / Snippets**: filter execution history by SQL, server, schema, or status without overwriting active consoles; save reusable SQL snippets (`Cmd/Ctrl+Shift+S`) with **Global** or **per-server** scope, folders, and pin-to-top.
-- **Result Grid, Foreign Key Navigation & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), **Foreign Key Navigation** (`Cmd+Click` or right-click outbound FK cells to jump to referenced rows + right-click *Find referencing rows* for inbound child tables), server-side `WHERE` filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
+- **Result Grid, Foreign Key Navigation & Vertical Record View**: aligned sticky header, drag-resizable columns (double-click divider to auto-fit), **Foreign Key Navigation** (`Cmd+Click` or right-click outbound FK cells to jump to referenced rows + right-click *Find referencing rows* for inbound child tables), server-side `WHERE` filter, `Cmd/Ctrl+Shift+F` instant in-memory row filter, right-click **Quick Filter** (`=` / `!=`), **View row as list** vertical drawer (column filter, hide NULLs, Pretty JSON, inline edit, copy JSON), **Compare 2 Rows** diff modal, and **Copy column as `IN (...)`**.
 - **DataGrip-style Inline Cell Editing**: edit cells directly inside table tabs and single-table `SELECT` console results (`Double-click`, `Enter`, `F2`, or type-to-edit). Tracks original column names (`org_name`), supports `NULL`/`DEFAULT`, lazy-loads >4 KiB truncated cells, commits atomically (using `SAVEPOINT` inside open transactions), saves directly with `Cmd/Ctrl+S` on non-PROD while requiring **SQL Preview** on `PROD`, and protects staged edits with an **Unsaved Changes** dialog.
 - **Copy, Streaming Export & CSV/JSON Import**: select rows with click, `Cmd/Ctrl+click`, `Shift+click`, or `Cmd/Ctrl+A`; copy as TSV (`Cmd/Ctrl+C`), CSV, JSON, JSON Lines, or SQL `INSERT`. Export the current page or **stream entire tables / full query results** directly to disk with constant RAM, live progress, and Cancel support. Import **CSV / TSV / JSON / JSONL** files into any table via right-click with auto column mapping, full-file **Dry-Run validation**, and atomic batched transactional inserts.
 - **Table Structure Editor, Schema Compare & ER Diagram**: edit table columns, indexes, and foreign keys with live `ALTER TABLE` SQL preview; compare two schemas across servers (e.g., DEV vs STAGING) to inspect DDL diffs and generate migration scripts; explore interactive pan/zoom **ER Diagrams** per schema.
-- **Diagnostics**: MySQL `EXPLAIN` / `EXPLAIN ANALYZE`, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
-- **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, on focus loss, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
+- **Diagnostics**: `EXPLAIN` / `EXPLAIN ANALYZE` on MySQL and PostgreSQL-family servers, `EXPLAIN QUERY PLAN` on SQLite, SQL Server SHOWPLAN / STATISTICS XML, live processlist with kill, and server health metrics.
+- **Reliable Workspace Auto-Save & Sessions**: named workspace sessions automatically persist open console tabs, SQL drafts, editor layout, and connected servers (400 ms debounce, on query run, when the SQL editor loses focus, and on quit) and auto-reconnect on launch. Reopen accidentally closed tabs with `Cmd/Ctrl+Shift+T`.
 - **Memory Guardrail**: all result grids share a 16 MiB budget with least-recently-used eviction. The most recently used result is always kept, and an evicted tab must be run or reloaded to fetch its rows again.
+- **In-App Updates**: check from the top bar or *Settings → Updates* (the startup check can be switched off). A download must match the release's `SHA256SUMS.txt` before it is installed. macOS app bundles, Windows installer and portable builds, and writable Linux binaries update in place; `.deb` installs download the package and show the `sudo apt install` command.
 
 ### Keyboard shortcuts
 
@@ -228,13 +232,21 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 | Reopen last closed tab | `Cmd+Shift+T` | `Ctrl+Shift+T` |
 | Close active tab | `Cmd+W` | `Ctrl+W` |
 | Switch to server 1..10 | `Cmd+1..0` | `Ctrl+1..0` |
+| Open the Quick Switcher (servers, schemas, tables) | `Cmd+K` | `Ctrl+K` |
+| Refresh the active table page or re-run the active query | `Cmd+R` | `Ctrl+R` |
 | Find / Find & Replace in SQL editor | `Cmd+F` / `Cmd+H` | `Ctrl+F` / `Ctrl+H` |
+| Toggle the in-memory row filter bar | `Cmd+Shift+F` | `Ctrl+Shift+F` |
 | Toggle line comment in SQL editor | `Cmd+/` | `Ctrl+/` |
 | Duplicate line / selection in SQL editor | `Cmd+Shift+D` | `Ctrl+Shift+D` |
 | Move line / selection up or down | `Alt+↑` / `Alt+↓` | `Alt+↑` / `Alt+↓` |
+| Fold / unfold SQL block at cursor | `Cmd+Alt+[` / `Cmd+Alt+]` | `Ctrl+Alt+[` / `Ctrl+Alt+]` |
+| Fold all queries / unfold all | `Cmd+Alt+Shift+[` / `Cmd+Alt+Shift+]` | `Ctrl+Alt+Shift+[` / `Ctrl+Alt+Shift+]` |
+| Open SQL Quick-Fix suggestions | `Alt+Enter` / `Cmd+.` | `Alt+Enter` / `Ctrl+.` |
 | Save active SQL as snippet | `Cmd+Shift+S` | `Ctrl+Shift+S` |
 | Save staged grid edits (Preview on PROD) | `Cmd+S` | `Ctrl+S` |
 | Save inside New/Edit Connection modal | `Cmd+Enter` | `Ctrl+Enter` |
+| Run from the Query Parameters dialog | `Cmd+Enter` | `Ctrl+Enter` |
+| Move the selected cell in the result grid | `↑` `↓` `←` `→` | `↑` `↓` `←` `→` |
 | Start inline cell edit | `Double-click` / `Enter` / `F2` / type | `Double-click` / `Enter` / `F2` / type |
 | Open multiline cell Value Inspector | `Shift+Enter` | `Shift+Enter` |
 | Set selected cell to SQL `NULL` | `Alt+Cmd+N` | `Alt+Ctrl+N` |
@@ -278,11 +290,19 @@ With [Inno Setup](https://jrsoftware.org/isinfo.php) installed, `iscc scripts\in
 
 ```bash
 cottondata-cli doctor
-cottondata-cli servers add local-db 127.0.0.1:3306 root myapp
+cottondata-cli servers add local-db 127.0.0.1:3306 root myapp --dev --ro
 cottondata-cli servers list
 COTTONDATA_PASSWORD=secret cottondata-cli test local-db
-COTTONDATA_PASSWORD=secret cottondata-cli query local-db "SELECT NOW()" --format csv
+COTTONDATA_PASSWORD=secret cottondata-cli schemas local-db
+COTTONDATA_PASSWORD=secret cottondata-cli query local-db "SELECT NOW()" --limit 500 --format csv
+cottondata-cli servers remove local-db
 ```
+
+| Command | Options |
+|---|---|
+| `servers add <name> <host:port> <user> [schema]` | `--prod`, `--staging`, `--dev` (environment tag), `--ro` (Read-Only Guard), `--tls-disabled`, `--tls-required` |
+| `servers remove <name-or-slot>` | none |
+| `query <server> <sql>` | `--limit N` (default `500`), `--format csv\|jsonl\|json\|sql` (default `csv`) |
 
 Full usage: `cottondata-cli help`.
 
@@ -314,12 +334,12 @@ crates/
 ├── mssql/       # SQL Server driver (tiberius, rustls) and sys-catalog introspection
 ├── postgres/    # PostgreSQL and CockroachDB driver (tokio-postgres, rustls), cursor paging, pg_catalog introspection
 ├── sqlite/      # SQLite driver (rusqlite, bundled SQLite) and PRAGMA introspection
-├── introspect/  # Driver-agnostic schema catalog with string interning
-├── sql/         # Lexer, statement splitter, safety linter, completion, formatter
-├── grid/        # Columnar result pages, staged edits, CSV/TSV/JSON/SQL export
-├── storage/     # Server profiles, sessions, query history, macOS Keychain
-├── cli/         # cottondata-cli
-└── desktop/     # CottonData GUI (eframe/egui)
+├── introspect/  # Driver-agnostic schema catalog with string interning, and schema diff
+├── sql/         # Lexer, statement splitter, safety linter, completion, formatter, query parameters, paging, DDL and edit builders
+├── grid/        # Columnar result pages, staged edits, CSV/TSV/JSON/SQL export, CSV/TSV/JSON/JSONL import
+├── storage/     # Server profiles, sessions, query history, saved snippets, macOS Keychain
+├── cli/         # cottondata-cli (MySQL only)
+└── desktop/     # CottonData GUI (eframe/egui) and in-app updater
 ```
 
 ## License
@@ -327,3 +347,5 @@ crates/
 Dual-licensed under **MIT** or **Apache-2.0**.
 
 Bundled fonts: [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), both under the SIL Open Font License 1.1 (see `assets/fonts/`).
+
+Bundled icons: a subset of [Phosphor Icons](https://github.com/phosphor-icons/web) (MIT) through [`egui-phosphor`](https://crates.io/crates/egui-phosphor), stored as `assets/fonts/Phosphor-Subset.ttf`.

@@ -4,7 +4,7 @@ pub mod dialect;
 pub mod registry;
 
 pub use budget::{BudgetStats, MemoryBudget, DEFAULT_GRID_BUDGET_BYTES, MAX_INLINE_CELL_BYTES};
-pub use diagnostics::{DbDiagnostic, DiagnosticSeverity};
+pub use diagnostics::{DbDiagnostic, DiagnosticSeverity, SqlErrorLocation, SqlErrorObjectKind};
 pub use dialect::{DatabaseEngine, SqlDialect};
 pub use registry::{
     ConnectionEndpoint, ConnectionStatus, EnvironmentTag, ServerProfile, ServerRegistry,

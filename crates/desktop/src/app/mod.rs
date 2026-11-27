@@ -23,6 +23,7 @@ mod sessions;
 mod settings_modal;
 mod snippets;
 mod sql_editor;
+mod sql_fold;
 mod structure_editor;
 mod table_actions;
 mod top_bar;

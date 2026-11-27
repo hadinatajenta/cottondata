@@ -274,6 +274,7 @@ struct SqlHighlightKey {
     wrap_width_bits: u32,
     is_dark: bool,
     matches_hash: u64,
+    fold_hash: u64,
     pixels_per_point_bits: u32,
 }
 
@@ -284,6 +285,7 @@ impl SqlHighlightKey {
         palette: Palette,
         matches: &[(usize, usize)],
         active_match: Option<usize>,
+        fold_hash: u64,
         pixels_per_point: f32,
     ) -> Self {
         Self {
@@ -292,6 +294,7 @@ impl SqlHighlightKey {
             wrap_width_bits: wrap_width.to_bits(),
             is_dark: palette.bg_card.r() < 128,
             matches_hash: hash_matches(matches, active_match),
+            fold_hash,
             pixels_per_point_bits: pixels_per_point.to_bits(),
         }
     }
@@ -320,6 +323,7 @@ impl SqlHighlightCache {
             palette,
             matches,
             active_match,
+            0,
             ui.ctx().pixels_per_point(),
         );
         if self.key.as_ref() == Some(&key) {
@@ -344,6 +348,47 @@ impl SqlHighlightCache {
         active_match: Option<usize>,
     ) -> std::sync::Arc<egui::Galley> {
         self.layout(ui, text, f32::INFINITY, palette, matches, active_match)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_projected_editor(
+        &mut self,
+        ui: &egui::Ui,
+        full_sql: &str,
+        display_text: &str,
+        doc_segments: &[(usize, usize)],
+        fold_hash: u64,
+        palette: Palette,
+        display_matches: &[(usize, usize)],
+        active_match: Option<usize>,
+    ) -> std::sync::Arc<egui::Galley> {
+        let key = SqlHighlightKey::compute(
+            display_text,
+            f32::INFINITY,
+            palette,
+            display_matches,
+            active_match,
+            fold_hash,
+            ui.ctx().pixels_per_point(),
+        );
+        if self.key.as_ref() == Some(&key) {
+            if let Some(galley) = &self.galley {
+                if galley.text() == display_text {
+                    return std::sync::Arc::clone(galley);
+                }
+            }
+        }
+        let galley = build_projected_mysql_layout(
+            ui,
+            full_sql,
+            doc_segments,
+            palette,
+            display_matches,
+            active_match,
+        );
+        self.key = Some(key);
+        self.galley = Some(std::sync::Arc::clone(&galley));
+        galley
     }
 
     pub fn invalidate(&mut self) {
@@ -402,6 +447,36 @@ pub fn highlight_mysql_editor_cached(
         .data(|data| data.get_temp::<SqlHighlightCache>(cache_id))
         .unwrap_or_default();
     let galley = cache.layout_editor(ui, text, palette, matches, active_match);
+    ui.ctx().data_mut(|data| data.insert_temp(cache_id, cache));
+    galley
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn highlight_sql_projected_cached(
+    ui: &egui::Ui,
+    cache_id: egui::Id,
+    full_sql: &str,
+    display_text: &str,
+    doc_segments: &[(usize, usize)],
+    fold_hash: u64,
+    palette: Palette,
+    display_matches: &[(usize, usize)],
+    active_match: Option<usize>,
+) -> std::sync::Arc<egui::Galley> {
+    let mut cache = ui
+        .ctx()
+        .data(|data| data.get_temp::<SqlHighlightCache>(cache_id))
+        .unwrap_or_default();
+    let galley = cache.layout_projected_editor(
+        ui,
+        full_sql,
+        display_text,
+        doc_segments,
+        fold_hash,
+        palette,
+        display_matches,
+        active_match,
+    );
     ui.ctx().data_mut(|data| data.insert_temp(cache_id, cache));
     galley
 }
@@ -521,6 +596,179 @@ fn build_mysql_layout(
                 cursor = seg_end;
             }
         }
+    }
+
+    ui.fonts(|fonts| fonts.layout_job(job))
+}
+
+fn token_color(kind: TokenKind, palette: Palette) -> Color32 {
+    match kind {
+        TokenKind::Keyword => palette.sql_keyword,
+        TokenKind::StringLiteral => palette.sql_string,
+        TokenKind::Number => palette.sql_number,
+        TokenKind::Comment => palette.sql_comment,
+        TokenKind::SystemVar => palette.sql_sysvar,
+        TokenKind::QuotedIdentifier => palette.icon_table,
+        TokenKind::Identifier | TokenKind::Operator | TokenKind::Punctuation => palette.sql_ident,
+        TokenKind::Whitespace => palette.text_primary,
+    }
+}
+
+struct MatchOverlay<'a> {
+    matches: &'a [(usize, usize)],
+    active_match: Option<usize>,
+    match_bg: Color32,
+    active_bg: Color32,
+}
+
+fn append_slice_with_matches(
+    job: &mut egui::text::LayoutJob,
+    slice: &str,
+    display_start: usize,
+    font_id: &FontId,
+    color: Color32,
+    overlay: &MatchOverlay<'_>,
+    match_idx: &mut usize,
+) {
+    let seg_end_abs = display_start + slice.len();
+    if overlay.matches.is_empty() {
+        job.append(
+            slice,
+            0.0,
+            TextFormat {
+                font_id: font_id.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+        return;
+    }
+
+    while *match_idx < overlay.matches.len() && overlay.matches[*match_idx].1 <= display_start {
+        *match_idx += 1;
+    }
+
+    let mut cursor = display_start;
+    let mut scan = *match_idx;
+    while cursor < seg_end_abs {
+        while scan < overlay.matches.len() && overlay.matches[scan].1 <= cursor {
+            scan += 1;
+        }
+        if scan >= overlay.matches.len() || overlay.matches[scan].0 >= seg_end_abs {
+            let sub = &slice[(cursor - display_start)..];
+            job.append(
+                sub,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    ..Default::default()
+                },
+            );
+            break;
+        }
+        let (m_start, m_end) = overlay.matches[scan];
+        if cursor < m_start {
+            let piece_end = m_start.min(seg_end_abs);
+            let sub = &slice[(cursor - display_start)..(piece_end - display_start)];
+            job.append(
+                sub,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    ..Default::default()
+                },
+            );
+            cursor = piece_end;
+        } else {
+            let piece_end = m_end.min(seg_end_abs);
+            let sub = &slice[(cursor - display_start)..(piece_end - display_start)];
+            let bg = if overlay.active_match == Some(scan) {
+                overlay.active_bg
+            } else {
+                overlay.match_bg
+            };
+            job.append(
+                sub,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    background: bg,
+                    ..Default::default()
+                },
+            );
+            cursor = piece_end;
+        }
+    }
+}
+
+fn build_projected_mysql_layout(
+    ui: &egui::Ui,
+    full_sql: &str,
+    doc_segments: &[(usize, usize)],
+    palette: Palette,
+    display_matches: &[(usize, usize)],
+    active_match: Option<usize>,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    let font_id = FontId::new(13.0, FontFamily::Monospace);
+    let overlay = MatchOverlay {
+        matches: display_matches,
+        active_match,
+        match_bg: palette.warning.gamma_multiply(0.32),
+        active_bg: palette.accent.gamma_multiply(0.45),
+    };
+    let tokens = tokenize(full_sql);
+
+    let mut tok_idx = 0usize;
+    let mut match_idx = 0usize;
+    let mut display_byte_pos = 0usize;
+
+    for (seg_idx, &(seg_doc_start, seg_doc_end)) in doc_segments.iter().enumerate() {
+        if seg_idx > 0 {
+            job.append(
+                "\n",
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color: palette.text_primary,
+                    ..Default::default()
+                },
+            );
+            display_byte_pos += 1;
+        }
+        while tok_idx < tokens.len() && tokens[tok_idx].end <= seg_doc_start {
+            tok_idx += 1;
+        }
+        let mut scan = tok_idx;
+        while scan < tokens.len() && tokens[scan].start < seg_doc_end {
+            let tok = &tokens[scan];
+            let lo = tok.start.max(seg_doc_start);
+            let hi = tok.end.min(seg_doc_end);
+            if lo < hi {
+                let slice = &full_sql[lo..hi];
+                let color = token_color(tok.kind, palette);
+                append_slice_with_matches(
+                    &mut job,
+                    slice,
+                    display_byte_pos,
+                    &font_id,
+                    color,
+                    &overlay,
+                    &mut match_idx,
+                );
+                display_byte_pos += slice.len();
+            }
+            if tok.end <= seg_doc_end {
+                scan += 1;
+            } else {
+                break;
+            }
+        }
+        tok_idx = scan;
     }
 
     ui.fonts(|fonts| fonts.layout_job(job))
@@ -681,28 +929,32 @@ mod tests {
     fn sql_highlight_cache_key_distinguishes_inputs() {
         let light = AppTheme::Light.palette();
         let dark = AppTheme::Dark.palette();
-        let k1 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 2.0);
-        let k2 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 2.0);
+        let k1 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 0, 2.0);
+        let k2 = SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 0, 2.0);
         assert_eq!(k1, k2);
         assert_ne!(
             k1,
-            SqlHighlightKey::compute("SELECT 2", f32::INFINITY, light, &[], None, 2.0)
+            SqlHighlightKey::compute("SELECT 2", f32::INFINITY, light, &[], None, 0, 2.0)
         );
         assert_ne!(
             k1,
-            SqlHighlightKey::compute("SELECT 1", 400.0, light, &[], None, 2.0)
+            SqlHighlightKey::compute("SELECT 1", 400.0, light, &[], None, 0, 2.0)
         );
         assert_ne!(
             k1,
-            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, dark, &[], None, 2.0)
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, dark, &[], None, 0, 2.0)
         );
         assert_ne!(
             k1,
-            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[(0, 6)], Some(0), 2.0)
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[(0, 6)], Some(0), 0, 2.0)
         );
         assert_ne!(
             k1,
-            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 1.0)
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 42, 2.0)
+        );
+        assert_ne!(
+            k1,
+            SqlHighlightKey::compute("SELECT 1", f32::INFINITY, light, &[], None, 0, 1.0)
         );
     }
 

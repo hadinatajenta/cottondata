@@ -288,11 +288,20 @@ impl CottonDataApp {
         self.clear_toast();
         let tab = &mut self.tabs[self.active_tab_idx];
 
+        let mut executed_stmt_spans: Vec<(usize, usize)> = Vec::new();
         let statements: Vec<String> = if run_all {
             split_statements(&tab.sql)
                 .into_iter()
-                .map(|s| s.sql.to_string())
-                .filter(|s| !s.trim().is_empty())
+                .filter_map(|s| {
+                    let trimmed = s.sql.trim();
+                    if trimmed.is_empty() {
+                        return None;
+                    }
+                    let start = trimmed_span_start(&tab.sql, s.start, s.end);
+                    let end = trimmed_span_end(&tab.sql, start, s.end);
+                    executed_stmt_spans.push((start, end));
+                    Some(s.sql.to_string())
+                })
                 .collect()
         } else if let Some((start, end)) = tab.selection_byte_range {
             let safe_start = start.min(tab.sql.len());
@@ -304,10 +313,21 @@ impl CottonDataApp {
                 let selected = &tab.sql[safe_start..safe_end];
                 let split: Vec<String> = split_statements(selected)
                     .into_iter()
-                    .map(|s| s.sql.to_string())
-                    .filter(|s| !s.trim().is_empty())
+                    .filter_map(|s| {
+                        let trimmed = s.sql.trim();
+                        if trimmed.is_empty() {
+                            return None;
+                        }
+                        let st = trimmed_span_start(&tab.sql, safe_start + s.start, safe_start + s.end);
+                        let en = trimmed_span_end(&tab.sql, st, safe_start + s.end);
+                        executed_stmt_spans.push((st, en));
+                        Some(s.sql.to_string())
+                    })
                     .collect();
                 if split.is_empty() && !selected.trim().is_empty() {
+                    let st = trimmed_span_start(&tab.sql, safe_start, safe_end);
+                    let en = trimmed_span_end(&tab.sql, st, safe_end);
+                    executed_stmt_spans.push((st, en));
                     vec![selected.trim().to_string()]
                 } else {
                     split
@@ -315,13 +335,23 @@ impl CottonDataApp {
             } else {
                 Vec::new()
             }
-        } else {
-            let single = statement_at_offset(&tab.sql, tab.cursor_byte)
-                .map(|s| s.sql.to_string())
-                .unwrap_or_else(|| tab.sql.trim().to_string());
-            if single.trim().is_empty() {
+        } else if let Some(stmt) = statement_at_offset(&tab.sql, tab.cursor_byte) {
+            if stmt.sql.trim().is_empty() {
                 Vec::new()
             } else {
+                let st = trimmed_span_start(&tab.sql, stmt.start, stmt.end);
+                let en = trimmed_span_end(&tab.sql, st, stmt.end);
+                executed_stmt_spans.push((st, en));
+                vec![stmt.sql.to_string()]
+            }
+        } else {
+            let single = tab.sql.trim().to_string();
+            if single.is_empty() {
+                Vec::new()
+            } else {
+                let st = trimmed_span_start(&tab.sql, 0, tab.sql.len());
+                let en = trimmed_span_end(&tab.sql, st, tab.sql.len());
+                executed_stmt_spans.push((st, en));
                 vec![single]
             }
         };
@@ -329,6 +359,10 @@ impl CottonDataApp {
         if statements.is_empty() {
             return;
         }
+        tab.last_executed_span = executed_stmt_spans.first().copied();
+        tab.last_executed_stmt_spans = executed_stmt_spans;
+        tab.server_diagnostic = None;
+        tab.quick_fix_popover_byte = None;
         let tab_id = tab.id;
         let params = extract_params_for_statements(&statements, self.slot_dialect(Some(slot)));
         if !params.is_empty() {
@@ -403,4 +437,25 @@ impl CottonDataApp {
         }
         self.persist_sessions_now();
     }
+}
+
+fn trimmed_span_start(sql: &str, start: usize, end: usize) -> usize {
+    let lo = start.min(sql.len());
+    let hi = end.min(sql.len()).max(lo);
+    sql[lo..hi]
+        .find(|c: char| !c.is_whitespace())
+        .map(|off| lo + off)
+        .unwrap_or(lo)
+}
+
+fn trimmed_span_end(sql: &str, start: usize, end: usize) -> usize {
+    let lo = start.min(sql.len());
+    let hi = end.min(sql.len()).max(lo);
+    sql[lo..hi]
+        .rfind(|c: char| !c.is_whitespace())
+        .map(|off| {
+            let ch_len = sql[lo + off..].chars().next().map_or(1, char::len_utf8);
+            lo + off + ch_len
+        })
+        .unwrap_or(hi)
 }

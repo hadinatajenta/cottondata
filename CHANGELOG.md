@@ -2,6 +2,23 @@
 
 All notable changes to CottonData are documented in this file.
 
+## [0.12.0] — 2026-11-27
+
+### Added
+- **DataGrip-Style SQL Code Folding (`crates/sql/src/fold.rs`, `crates/desktop/src/app/sql_fold.rs`)**:
+  - Fold and unfold multi-line SQL statements, multi-line clauses (`SELECT`, `FROM`, `JOIN..ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `SET`, `VALUES`, `UNION`), CTEs (`WITH ... AS (...)`), subqueries and parenthesized blocks, `CASE ... END`, procedural blocks (`BEGIN ... END`, `BEGIN TRY/CATCH`, `IF ... END IF`), PostgreSQL dollar-quoted bodies (`$$ ... $$`), multi-line comments (`/* ... */`, consecutive `--`/`#`), and custom `-- region Name` / `-- endregion` blocks.
+  - True document line numbers in the gutter, hover scope guide line & range tint, `Alt+Click` recursive fold/unfold, clickable inline fold pills (`… 12 lines`, `… )`, `… END`) with syntax-highlighted SQL hover preview tooltips, toolbar Fold/Unfold buttons, and keyboard shortcuts (`Cmd/Ctrl+Alt+[`, `Cmd/Ctrl+Alt+]`, `Cmd/Ctrl+Alt+Shift+[`, `Cmd/Ctrl+Alt+Shift+]`).
+  - Document-level undo/redo stack, full-text clipboard copy/cut across collapsed folds, safe fold-boundary Backspace auto-unfolding, doc-space syntax highlighting, fold-aware Find & Replace and line editing shortcuts, and automatic fold persistence in workspace sessions (`sessions.json`).
+- **Live SQL Error Highlighting & 1-Click Quick-Fix Suggestions (`crates/sql/src/lint.rs`, driver diagnostics)**:
+  - Real-time static SQL linter detecting unclosed quotes/parentheses/comments/`CASE`/`BEGIN`, trailing commas before clauses, keyword typos (`SELCT`, `FORM`, `WHER`, `GROPU BY`, etc.), `GROUP`/`ORDER` without `BY`, `= NULL` / `!= NULL` predicates, dialect mismatches (`LIMIT` on SQL Server, `IFNULL`/backticks on PostgreSQL, `ILIKE` on non-PostgreSQL), and schema-aware unknown table/column checks with fuzzy *"Did you mean…?"* suggestions.
+  - Structured server error locations across PostgreSQL/CockroachDB (`position`, `SQLSTATE`, server hints), MySQL (`near '...' at line N`, error codes `1052`/`1054`/`1055`/`1064`/`1146`/`1305`), SQL Server (`TokenError::line()`, codes `102`/`156`/`207`/`208`/`209`/`8120`), and SQLite.
+  - Squiggly error/warning underlines, hover & keyboard (`Alt+Enter` / `Cmd/Ctrl+.`) Quick-Fix popover with 1-click patches, and an actionable error banner with *Jump* and *Apply Fix*.
+- **Query Execution Status Indicators**:
+  - Green checkmark (`✓`) and red cross (`✗`) indicators both in the SQL editor gutter on executed query lines (with hover summary tooltips) and beside the editor status bar.
+
+### Changed
+- **Top-Right Toast Notifications**: moved workspace toast overlays from bottom-right to top-right just below the document tab strip so the `+` New Console button remains unobstructed.
+
 ## [0.11.1] — 2026-11-27
 
 ### Fixed
@@ -15,7 +32,7 @@ All notable changes to CottonData are documented in this file.
 
 ### Added
 - **Fast Auto-Limited Queries & Infinite Scroll (`crates/sql/src/paging.rs`, `crates/grid/src/page.rs`)**:
-  - Automatic server-side row cap (`page_size = 100` by default) for unbounded `SELECT` queries across all five engines (`SET SESSION sql_select_limit` on MySQL/MariaDB, batched `SET ROWCOUNT` on SQL Server, cursor-capped reads on PostgreSQL, `LIMIT` push-down on CockroachDB, and early step termination on SQLite), with a toolbar `Limit` selector (`100`, `200`, `500`, `1,000`, `5,000`, `Unlimited`).
+  - Automatic server-side row cap (`page_size = 100` by default) for unbounded `SELECT` queries across all five engines (`SET SESSION sql_select_limit` on MySQL/MariaDB, batched `SET ROWCOUNT` on SQL Server, cursor-capped reads on PostgreSQL, `LIMIT` push-down on CockroachDB, and early step termination on SQLite), with a toolbar `Limit` selector (`50`, `100`, `200`, `500`, `1,000`, `Unlimited`).
   - Automatic infinite-scroll continuation (`FetchMoreRows` + `ColumnarPage::append_page`) and $O(1)$ keyset seek pagination for single-PK Table Tabs.
 - **Click-to-Sort Column Headers (`DESC → ASC → Default`)**:
   - Click any column header in both **Table Tabs** and **SQL Console** results to cycle `DESC → ASC → Default`, with right-pinned sort icons (`SORT_DESCENDING` / `SORT_ASCENDING`, hover `ARROWS_DOWN_UP`) that never clip behind `…`.

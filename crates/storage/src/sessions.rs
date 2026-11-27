@@ -24,6 +24,8 @@ pub struct SessionTabState {
     pub page_size: u32,
     #[serde(default)]
     pub show_sql_editor: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_start_lines: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
